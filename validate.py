@@ -13,7 +13,7 @@ from torch import Tensor
 from pinn.problems.two_arm import sample_sobol
 from pinn.problems.two_arm import ExplorationPremium, ValueFunction
 
-state = torch.load(Path("data") / "value.pt")
+state = torch.load(Path("data") / "two_arm.pt")
 hidden = [weight.shape[0] for key, weight in state.items() if key.endswith(".weight")][
     :-1
 ]

@@ -328,9 +328,19 @@ plus the two_arm champion in the a-b far field):
 
 - The chain MC free-info <= nu-sum holds everywhere (no violations in 40k
   pointwise draws).
-- Near the triple point -- the genuinely new region -- the nu-sum is nearly
-  tight: median slack 1.01x over the free-info bound; high correlation only
-  makes it more conservative, never violated.
+- CORRECTED 2026-08-05: the original reading here ("nearly tight near the
+  triple point, median slack 1.01x") was an artifact of the measurement's
+  sampling, dominated by states with means a standard deviation or more below
+  zero (where one nu term vanishes and the sum trivially approaches the
+  bound). At the ACTUAL triple point m = 0 the nu-sum slack over the
+  free-info bound is 1.17x uncorrelated, growing to 1.87x at correlation
+  0.99 (MC, 2e7 draws): the max-splitting inequality of step 2 is strict
+  wherever both challengers are live. Consequence for the model: the
+  response factor must learn ~0.85 (uncorrelated) down to ~0.53 (high
+  correlation) at the startup triple point, NOT 1. The exact startup
+  solution is E[max(0, theta_b, theta_c)] itself (section 14); the nu-sum
+  solves the startup interior equation but misses the control wall by
+  exactly Phi(z_c').
 - Far field: dominates the trained two_arm premium throughout the corridor
   (min slack 1.9x at tauhat = 0.2, growing like sqrt(tauhat)) -- the same
   safe-direction mismatch two_arm's envelope had.
@@ -344,7 +354,135 @@ bound contains only the two control-contrast marginals, and correlation
 enters E[max] only by shrinking it. Knowledge of b-vs-c alone cannot sustain
 a premium when both treatments are hopeless.
 
+## 14. Self-similar coordinates (implementation chart; derived and verified 2026-08-05)
+
+The dimensionless chart of sections 0-13 remains the reference frame for all
+thinking; this chart is an implementation detail for *grading residuals*: in
+it every derivative term of the PDE has bounded coefficients, so numerical
+differentiation error is never amplified by $1/\det T$. Derivation by agent,
+every identity verified in float64 against the raw-coordinate implementation
+(128 wedge states, max relative error $2.7\times10^{-13}$).
+
+### 14.1 Map: dimensionless $\to$ self-similar
+
+With $T = \begin{pmatrix}\tau_{bb} & \tau_{bc}\\ \tau_{bc} & \tau_{cc}\end{pmatrix}$
+and the marginal (Schur) precisions $p_b, p_c$:
+
+$$
+S=\sqrt{\det T},\qquad s=\log S,\qquad
+k=\frac{-\tau_{bc}}{\sqrt{\tau_{bb}\,\tau_{cc}}},\qquad
+r=\tfrac12\log\frac{\tau_{bb}}{\tau_{cc}}
+$$
+
+$$
+p_b=\frac{\det T}{\tau_{cc}},\qquad p_c=\frac{\det T}{\tau_{bb}},\qquad
+z_b=m_b\sqrt{p_b},\qquad z_c=m_c\sqrt{p_c}
+$$
+
+$$
+g(z_b,z_c,r,k,s)\;=\;S^{1/2}\,u(m_b,m_c,T)
+$$
+
+$S$ is the overall information scale ($\det T$ is the exact S3 invariant:
+relabels act by unit-determinant congruence), $k$ the posterior correlation
+of the two contrasts ($k\in[0,1)$ on the wedge), $r$ the precision asymmetry,
+$z$ the marginal z-scores.
+
+### 14.2 Map: self-similar $\to$ dimensionless
+
+$$
+\tau_{bb}=\frac{S\,e^{r}}{\sqrt{1-k^2}},\qquad
+\tau_{cc}=\frac{S\,e^{-r}}{\sqrt{1-k^2}},\qquad
+\tau_{bc}=\frac{-S\,k}{\sqrt{1-k^2}}
+$$
+
+$$
+m_b=\frac{z_b\,e^{-r/2}}{S^{1/2}\,(1-k^2)^{1/4}},\qquad
+m_c=\frac{z_c\,e^{r/2}}{S^{1/2}\,(1-k^2)^{1/4}},\qquad
+u=S^{-1/2}\,g
+$$
+
+(Check: $\tau_{bb}\tau_{cc}-\tau_{bc}^2 = S^2$, and
+$p_b = S\,e^{r}\sqrt{1-k^2}$, consistent with 14.1.)
+
+### 14.3 Fixed-policy HJB in self-similar coordinates
+
+On the wedge the commit value is $0$, so $v = u$. Dimensionless pairwise
+variances (posterior variances of the three pair contrasts, in units of $1/S$):
+
+$$
+V_{ab}=\frac{e^{-r}}{\sqrt{1-k^2}},\qquad
+V_{ac}=\frac{e^{r}}{\sqrt{1-k^2}},\qquad
+V_{bc}=\frac{2(\cosh r-k)}{\sqrt{1-k^2}}=V_{ab}+V_{ac}-\frac{2k}{\sqrt{1-k^2}}
+$$
+
+The section 4 fixed-policy PDE, multiplied through by $S^{3/2}$, becomes
+
+$$
+e^{s}\,g
+= e^{s}\!\left(\alpha_b\sqrt{V_{ab}}\,z_b+\alpha_c\sqrt{V_{ac}}\,z_c\right)
++\alpha_a\alpha_b\,\frac{V_{ab}}{2}\,M_{ab}[g]
++\alpha_a\alpha_c\,\frac{V_{ac}}{2}\,M_{ac}[g]
++\alpha_b\alpha_c\,\frac{V_{bc}}{2}\,M_{bc}[g]
+$$
+
+with the three learning operators (the dimensionless learning numbers are
+$l_p = S^{-3/2}\,\tfrac{V_p}{2}\,M_p[g]$):
+
+$$
+M_{ab}[g]=g_{z_bz_b}+2k\,g_{z_bz_c}+k^2 g_{z_cz_c}
++z_b g_{z_b}+k^2 z_c g_{z_c}
++(1-k^2)\,g_r-k(1-k^2)\,g_k+g_s-\tfrac{1}{2}g
+$$
+
+$$
+M_{ac}[g]=k^2 g_{z_bz_b}+2k\,g_{z_bz_c}+g_{z_cz_c}
++k^2 z_b g_{z_b}+z_c g_{z_c}
+-(1-k^2)\,g_r-k(1-k^2)\,g_k+g_s-\tfrac{1}{2}g
+$$
+
+$$
+M_{bc}[g]=P_b\,g_{z_bz_b}+Q\,g_{z_bz_c}+P_c\,g_{z_cz_c}
++P_b z_b g_{z_b}+P_c z_c g_{z_c}
++R_r\,g_r+R_k\,g_k+g_s-\tfrac{1}{2}g
+$$
+
+$$
+P_b=\frac{e^{-r}-2k+k^2e^{r}}{2(\cosh r-k)},\qquad
+P_c=\frac{e^{r}-2k+k^2e^{-r}}{2(\cosh r-k)},\qquad
+Q=-\frac{1+k^2-2k\cosh r}{\cosh r-k}
+$$
+
+$$
+R_r=-\frac{(1-k^2)\sinh r}{\cosh r-k},\qquad
+R_k=\frac{(1-k^2)(1-k\cosh r)}{\cosh r-k}
+$$
+
+Structure worth registering:
+
+- $e^{s}$ multiplies only derivative-free terms; every derivative coefficient
+  is bounded on the whole wedge ($P_b, P_c \in [0,1]$, $Q \in [-1,2]$,
+  $R_r \in [-1,1]$, $R_k \in [-0.385, 1]$). The full HJB adds
+  $\max_{\alpha \in \Delta}$; the seven candidates of section 10 apply
+  unchanged with $L_p = \tfrac{V_p}{2} M_p$ and linear coefficients
+  $e^{s}\sqrt{V_p}\,z + L_p$.
+- The $V_p$ prefactors are NOT bounded ($V_{ab}V_{ac} = 1/(1-k^2)$); the
+  recommended, argmax-invariant normalization divides the equation by
+  $c = (V_{ab}+V_{ac}+V_{bc})/2$, giving diffusion weights in $[0,1]$
+  summing to 1 and the single scalar clock
+  $e^{s}/c = \det T/(I_{ab}+I_{ac}+I_{bc})$.
+- Both wall conditions and both mirror maps are $s$-free; the mirrors act as
+  transpositions of $(V_{ab}, V_{ac}, V_{bc})$ (treatment mirror:
+  $r \to -r$).
+- Startup ($s \to -\infty$): the source dies and the exact stationary
+  solution is $g_0 = S^{1/2}\,E[\max(0,\theta_b,\theta_c)]$ — it satisfies
+  the interior AND both walls. The nu-sum envelope solves the startup
+  interior (it is a belief martingale) but fails the control wall by exactly
+  $\Phi(z_c')$ — see the section 13 correction.
+- Two_arm is recovered at $k = 0$ via $\log\hat\tau = s + r$.
+
 ## To come
 
 - Nothing mathematical: the problem is fully derived. Remaining work is code
-  (the envelope into ExplorationPremium) and then training.
+  (the similarity-graded residual per section 14, mirroring two_arm's) and
+  then training.

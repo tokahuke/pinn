@@ -11,17 +11,23 @@ from dataclasses import dataclass
 from torch import Tensor
 from torch.quasirandom import SobolEngine
 
-# Sampling constants: the diagonal prior floor keeps det T >= PRIOR_FLOOR**2
-# (the generalization of two_arm's tauhat >= 0.1, fencing the singular
-# boundary of the information box); PRECISION_MEAN is the Exp tail per pairwise
-# precision; MEAN_SCALE is the Laplace width in units of each mean's own
-# posterior standard deviation.
-PRIOR_FLOOR = 0.1
+# Sampling constants: the floor keeps det T >= PRIOR_FLOOR**2, fencing the
+# singular boundary of the information box. Numerical stability ONLY -- it
+# encodes no prior; the net is trained general down to priors ~30 sd wide.
+# No real experiment starts more agnostic than that, and each decade below
+# costs another 100x in PDE stiffness (the learning numbers carry 1/det) for
+# territory nobody visits. PRECISION_MEAN scales the chi-squared-1 law
+# per pairwise precision; SCALE_DECADES is the log10 range of the common
+# scale multiplying all three (jointly-low states get whole-decade mass,
+# never a triple coincidence); MEAN_SCALE is the Laplace width in units of
+# each mean's own posterior standard deviation.
+PRIOR_FLOOR = 1e-3
 PRECISION_MEAN = 2.0
+SCALE_DECADES = 3.0
 MEAN_SCALE = 2.0
 
-_SOBOL = SobolEngine(dimension=5, scramble=True)
-_SOBOL_WALL = SobolEngine(dimension=4, scramble=True)
+_SOBOL = SobolEngine(dimension=6, scramble=True)
+_SOBOL_WALL = SobolEngine(dimension=5, scramble=True)
 
 
 @dataclass
@@ -40,12 +46,14 @@ class Sample:
     @classmethod
     def draw(cls, n: int) -> Sample:
         """
-        Scrambled 5-D Sobol pushed through the sampling alchemy of doc
-        sections 6-7: three pairwise precisions + two
-        conditionally-scaled means.
+        Scrambled 6-D Sobol pushed through the sampling alchemy of doc
+        sections 6-7: a common information scale, three pairwise precisions,
+        two conditionally-scaled means.
         """
         t = _SOBOL.draw(n).clamp(1e-7, 1.0 - 1.0e-7)
-        tau_bb, tau_bc, tau_cc = _precision_from_uniforms(t[:, 0], t[:, 1], t[:, 2])
+        tau_bb, tau_bc, tau_cc = _precision_from_uniforms(
+            t[:, 0], t[:, 1], t[:, 2], t[:, 5]
+        )
 
         # Means last, conditionally on the precisions: each mean is drawn with
         # width proportional to its own posterior standard deviation, so the
@@ -120,7 +128,9 @@ class RidgeSample:
         standard deviation.
         """
         t = _SOBOL_WALL.draw(n).clamp(1e-7, 1.0 - 1.0e-7)
-        tau_bb, tau_bc, tau_cc = _precision_from_uniforms(t[:, 0], t[:, 1], t[:, 2])
+        tau_bb, tau_bc, tau_cc = _precision_from_uniforms(
+            t[:, 0], t[:, 1], t[:, 2], t[:, 4]
+        )
 
         det = tau_bb * tau_cc - tau_bc**2
         m_c = -MEAN_SCALE * (tau_bb / det).sqrt() * _exponential(t[:, 3])
@@ -135,7 +145,9 @@ class RidgeSample:
         standard deviations.
         """
         t = _SOBOL_WALL.draw(n).clamp(1e-7, 1.0 - 1.0e-7)
-        tau_bb, tau_bc, tau_cc = _precision_from_uniforms(t[:, 0], t[:, 1], t[:, 2])
+        tau_bb, tau_bc, tau_cc = _precision_from_uniforms(
+            t[:, 0], t[:, 1], t[:, 2], t[:, 4]
+        )
 
         det = tau_bb * tau_cc - tau_bc**2
         deviation = 0.5 * ((tau_cc / det).sqrt() + (tau_bb / det).sqrt())
@@ -151,6 +163,18 @@ def _exponential(u: Tensor) -> Tensor:
     return -(1.0 - u).log()
 
 
+def _chi_squared_1(u: Tensor) -> Tensor:
+    """
+    Chi-squared with 1 dof via inverse CDF, u in (0, 1): the square of a
+    standard normal. Density diverges at 0, so P(X < eps) ~ sqrt(eps): tiny
+    values are favored, not coincidental. Chosen for the pairwise precisions
+    so the startup corner (all three channels near zero information at once)
+    carries real sampling mass; independent Exp tails made it a ~1e-5 triple
+    coincidence and the policy was garbage exactly there.
+    """
+    return torch.special.ndtri(0.5 + 0.5 * u) ** 2
+
+
 def _laplace(u: Tensor) -> Tensor:
     """
     Unit Laplace via inverse CDF, u in (0, 1) -> two-sided heavy-ish tails.
@@ -161,16 +185,20 @@ def _laplace(u: Tensor) -> Tensor:
 
 
 def _precision_from_uniforms(
-    u_ab: Tensor, u_ac: Tensor, u_bc: Tensor
+    u_ab: Tensor, u_ac: Tensor, u_bc: Tensor, u_scale: Tensor
 ) -> tuple[Tensor, Tensor, Tensor]:
     """
-    Uniforms -> pairwise precisions (Exp tails on the box corner,
-    every draw reachable) -> precision entries via the doc section 7 affine
-    map, with the prior floor keeping T invertible on the box faces.
+    Uniforms -> pairwise precisions (chi-squared-1 shapes times one common
+    log-spread scale, every draw reachable) -> precision entries via the doc
+    section 7 affine map, with the floor keeping T invertible on the box
+    faces. The common scale spans SCALE_DECADES decades downward, densest at
+    1: it moves all three precisions together, so low-information states of
+    every magnitude are first-class events.
     """
-    precision_ab = PRECISION_MEAN * _exponential(u_ab)
-    precision_ac = PRECISION_MEAN * _exponential(u_ac)
-    precision_bc = PRECISION_MEAN * _exponential(u_bc)
+    scale = PRECISION_MEAN * torch.pow(10.0, -SCALE_DECADES * u_scale**2)
+    precision_ab = scale * _chi_squared_1(u_ab)
+    precision_ac = scale * _chi_squared_1(u_ac)
+    precision_bc = scale * _chi_squared_1(u_bc)
 
     tau_bb = PRIOR_FLOOR + precision_ab + precision_bc
     tau_cc = PRIOR_FLOOR + precision_ac + precision_bc

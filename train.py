@@ -13,7 +13,7 @@ from pathlib import Path
 
 from pinn.train import decay, train
 
-HIDDEN = [512, 128]
+HIDDEN = [32, 512,]
 
 
 @click.command()
@@ -57,7 +57,7 @@ def main(problem: str, in_path: Path | None, out_path: Path | None) -> None:
 
     try:
         for _ in itertools.islice(
-            train(value, module.objective(batch=1024), lr=decay(1e-4, 10_000)), None
+            train(value, module.objective(batch=1024), lr=decay(3e-4, 100_000)), None
         ):
             pass
     except KeyboardInterrupt:

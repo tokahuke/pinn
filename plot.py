@@ -14,7 +14,7 @@ from torch import Tensor
 
 from pinn.problems.two_arm import ExplorationPremium, ValueFunction
 
-TAUHAT = 0.1
+TAUHAT = 0.01
 
 muhat_axis = torch.linspace(1e-3, 2.5, 301)
 tauhat_axis = torch.linspace(0.1, 4.0, 301)

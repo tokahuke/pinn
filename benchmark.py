@@ -1,6 +1,7 @@
 """
-Monte Carlo shoot-out: the trained PINN policy vs explore-then-commit (50/50
-until T = 1/(2 rho), then bang-bang). Dimensionless units (rho = sigma = 1),
+Monte Carlo shoot-out: the trained PINN policy vs optimally-timed
+explore-then-commit (50/50 until the commit time maximizing the analytic
+ETC value at TAU0, then bang-bang). Dimensionless units (rho = sigma = 1),
 posterior-space simulation from the ridge (m = 0, tau = TAU0).
 """
 
@@ -15,12 +16,17 @@ from torch import Tensor
 from pinn.problems.two_arm import ExplorationPremium, ValueFunction
 
 TAU0 = 1.0
-COMMIT_TIME = 0.5
-DT = 2e-3
+DT = 1e-3
 HORIZON = 12.0
 PATHS = 50_000
 
-state = torch.load(Path("data") / "value.pt")
+# Optimally-timed explore-then-commit at THIS tau0: maximize the analytic
+# commit value e^-T sqrt(variance(T) / 2 pi) over the commit time.
+_times = torch.linspace(0.01, 2.0, 2000)
+_variances = 1.0 / TAU0 - 1.0 / (TAU0 + _times / 4)
+COMMIT_TIME = float(_times[(torch.exp(-2.0 * _times) * _variances).argmax()])
+
+state = torch.load(Path("data") / "two_arm.pt")
 hidden = [weight.shape[0] for key, weight in state.items() if key.endswith(".weight")][
     :-1
 ]
@@ -28,41 +34,40 @@ hidden = [weight.shape[0] for key, weight in state.items() if key.endswith(".wei
 value = ValueFunction(ExplorationPremium(hidden))
 value.load_state_dict(state)
 
-# Policy table on muhat >= 0; bilinear lookup + arm-swap symmetry at run time.
-MU_MAX = 6.0
+# Policy table on the similarity chart (z, s) = (muhat sqrt(tauhat), log tauhat):
+# the policy is smooth there at every information level, and the similarity
+# operator M grades alpha without the 1/tauhat^2 error amplification of the raw
+# form. Bilinear lookup + arm-swap symmetry at run time.
+Z_MAX = 8.0
 TAU_MAX = TAU0 + HORIZON / 4 + 0.1
-mu_axis = torch.linspace(0.0, MU_MAX, 481)
-tau_axis = torch.linspace(TAU0, TAU_MAX, 481)
+z_axis = torch.linspace(0.0, Z_MAX, 481)
+s_axis = torch.linspace(math.log(TAU0), math.log(TAU_MAX), 481)
 
 
 def policy_table() -> Tensor:
-    mu_grid, tau_grid = torch.meshgrid(mu_axis, tau_axis, indexing="ij")
-    muhat = mu_grid.flatten().requires_grad_(True)
-    tauhat = tau_grid.flatten().requires_grad_(True)
+    from pinn.problems.two_arm.simplex import maximize_quadratic
 
-    v = value(muhat, tauhat)
-    v_muhat, v_tauhat = torch.autograd.grad(v.sum(), [muhat, tauhat], create_graph=True)
-    (v_muhat_muhat,) = torch.autograd.grad(v_muhat.sum(), muhat)
+    z_grid, s_grid = torch.meshgrid(z_axis, s_axis, indexing="ij")
+    z = z_grid.flatten().requires_grad_(True)
+    s = s_grid.flatten().requires_grad_(True)
 
-    lhat = v_tauhat.detach() + v_muhat_muhat / (2 * tauhat.detach() ** 2)
-    concave = lhat > 0
-    safe_lhat = lhat.masked_fill(~concave, 1.0)
-    alpha = torch.where(
-        concave,
-        ((muhat.detach() + lhat) / (2 * safe_lhat)).clamp(0.0, 1.0),
-        (muhat.detach() > 0).float(),
-    )
+    g = (s / 2).exp() * value.premium(z * (-s / 2).exp(), s.exp())
+    g_z, g_s = torch.autograd.grad(g.sum(), [z, s], create_graph=True)
+    (g_zz,) = torch.autograd.grad(g_z.sum(), z)
 
-    return alpha.detach().reshape(len(mu_axis), len(tau_axis))
+    m_of_g = (g_s + 0.5 * g_zz + 0.5 * z * g_z - 0.5 * g).detach()
+    best = maximize_quadratic(-m_of_g, s.detach().exp() * z.detach() + m_of_g)
+
+    return best.x.reshape(len(z_axis), len(s_axis))
 
 
 TABLE = policy_table()
 
 
 def pinn_policy(m: Tensor, tau: Tensor, t: float) -> Tensor:
-    i = ((m.abs() / MU_MAX) * (len(mu_axis) - 1)).clamp(0, len(mu_axis) - 2)
-    j = (((tau - TAU0) / (TAU_MAX - TAU0)) * (len(tau_axis) - 1)).clamp(
-        0, len(tau_axis) - 2
+    i = ((m.abs() * tau.sqrt() / Z_MAX) * (len(z_axis) - 1)).clamp(0, len(z_axis) - 2)
+    j = ((tau.log() - s_axis[0]) / (s_axis[-1] - s_axis[0]) * (len(s_axis) - 1)).clamp(
+        0, len(s_axis) - 2
     )
     i0, j0 = i.long(), j.long()
     di, dj = i - i0, j - j0
@@ -82,6 +87,20 @@ def baseline_policy(m: Tensor, tau: Tensor, t: float) -> Tensor:
         return torch.full_like(m, 0.5)
 
     return (m > 0).float()
+
+
+def ztest_policy(m: Tensor, tau: Tensor, t: float) -> Tensor:
+    """
+    The impatient experimenter: 50/50 until the continuously-peeked z-test
+    rejects at 5%, then commit to the winner. The statistic is data-only, so
+    the prior must be subtracted back out of the posterior state: data
+    precision tau - TAU0, data mean m tau/(tau - TAU0), hence
+    z = m tau / sqrt(tau - TAU0). Commitment is absorbing via simulate().
+    """
+    z_data = m * tau / (tau - TAU0).clamp_min(1e-12).sqrt()
+    significant = z_data.abs() > 1.96
+
+    return torch.where(significant, (m > 0).float(), torch.full_like(m, 0.5))
 
 
 def simulate(policy) -> Tensor:
@@ -120,11 +139,13 @@ with torch.no_grad():
 
 pinn_values = simulate(pinn_policy)
 baseline_values = simulate(baseline_policy)
+ztest_values = simulate(ztest_policy)
 
 variance = 1.0 / TAU0 - 1.0 / (TAU0 + COMMIT_TIME / 4)
 analytic_baseline = math.exp(-COMMIT_TIME) * math.sqrt(variance / (2 * math.pi))
 stderr = 2.0 / math.sqrt(PATHS)
 
+print(f"ETC commit time (optimized)  = {COMMIT_TIME:.3f}")
 print(f"net's own claim v(0, {TAU0})    = {predicted:.4f}")
 print(
     f"PINN policy (simulated)      = {pinn_values.mean():.4f}"
@@ -136,5 +157,16 @@ print(
 )
 print(f"explore-then-commit (exact)  = {analytic_baseline:.4f}")
 print(
-    f"PINN / baseline              = {pinn_values.mean() / baseline_values.mean():.3f}"
+    f"z-test at 5% (peeking)       = {ztest_values.mean():.4f}"
+    f" +/- {stderr * ztest_values.std():.4f}"
+)
+# Differences headline: real money is sigma/sqrt(rho) times these, and the
+# ratio divides out exactly the prior-width scaling that pays the bills.
+print(
+    f"PINN - baseline              = {pinn_values.mean() - baseline_values.mean():.4f}"
+    f"   (ratio {pinn_values.mean() / baseline_values.mean():.3f})"
+)
+print(
+    f"PINN - z-test                = {pinn_values.mean() - ztest_values.mean():.4f}"
+    f"   (ratio {pinn_values.mean() / ztest_values.mean():.3f})"
 )

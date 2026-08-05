@@ -167,3 +167,77 @@ Use these as consistency checks on any numerical solution:
   at ~0.43-0.44, tightening the bracket to [0.43, 0.46]: the two methods now
   disagree only about the ansatz's jump itself, so the truth is ~0.44-0.46 with
   the PINN's continuous shape.
+
+## 8. Similarity coordinates (exact transcription; startup solution)
+
+Measure the lead in posterior standard deviations, the premium in posterior standard
+deviations, and let the clock be logarithmic:
+
+    z = muhat * sqrt(tauhat)              # the z-score
+    s = log tauhat
+    u(muhat, tauhat) = tauhat^(-1/2) * g(z, s)
+
+Chain rule (`z_muhat = sqrt(tauhat)`, `z_tauhat = z/(2 tauhat)`, `s_tauhat = 1/tauhat`):
+
+    u_muhat = g_z                         # the sd factors cancel exactly
+    u_mm    = sqrt(tauhat) * g_zz
+    u_tauhat = tauhat^(-3/2) * ( g_s + (z/2) g_z - g/2 )
+
+Substituting into the section 4 PDE, every left-side term carries the common factor
+`tauhat^(-3/2)`; dividing it out:
+
+    g_s + (1/2) g_zz + (z/2) g_z - (1/2) g = tauhat * ( sqrt(g) + sqrt(g + z) )^2,
+    tauhat = e^s
+
+Why this matters numerically: every derivative term has an O(1) coefficient at every
+tauhat. The `1/(2 tauhat^2)` that multiplied curvature in raw coordinates — 9 decades
+of coefficient spread over the sampled range, amplifying any curvature error of a
+numerical solution — is cancelled algebraically. The only surviving scale factor,
+`e^s`, multiplies the derivative-free source term. A residual formed in `(z, s)` never
+multiplies differentiation error by a large number.
+
+Boundary conditions transcribe to:
+
+    BC1:  g_z(0, s) = -1/2                          (s-independent, no prefactor)
+    BC2:  g = 0    at  z = Z(s) := G(tauhat) sqrt(tauhat)
+    BC3:  g_z = 0  at  z = Z(s)
+    Curvature law:  g_zz|_{Z-} = 2 e^s Z(s)
+
+The two regimes of the "almost self-similar" structure are now explicit: as
+`s -> -infinity` the source dies and the equation is linear; as `s` grows the source
+dominates and squeezes the corridor (`Z ~ e^(-s/2)/2` from the section 6 tail law).
+The raw-coordinate stiffness at small tauhat was rent paid on this crossover, not
+physics.
+
+### The startup solution is the free-information envelope, exactly
+
+In the startup limit the stationary, source-free equation is
+
+    (1/2) g_zz + (z/2) g_z - (1/2) g = 0.
+
+Try `g(z) = nu(-z, 1)` — the free-information bound shape (docs/three_arm.md
+section 13), `nu(m, 1) = m Phi(m) + phi(m)`. Its derivatives are `g_z = -Phi(-z)`
+and `g_zz = phi(z)`, so
+
+    (1/2) phi(z) - (z/2) Phi(-z) - (1/2) ( -z Phi(-z) + phi(z) ) = 0    identically,
+
+and `g_z(0) = -Phi(0) = -1/2`: BC1 holds on the nose. Therefore
+
+    u -> tauhat^(-1/2) * nu(-z, 1)    as  tauhat -> 0,   exactly.
+
+Consequences:
+
+- The proven envelope `nu(-muhat, tauhat^(-1/2)) = tauhat^(-1/2) nu(-z, 1)` is not
+  just an upper bound: it is TIGHT at zero information. The architecture's response
+  factor must tend to 1 as `tauhat -> 0`, and `log_scale = 0` initialization is the
+  asymptotically exact start.
+- The premium-net architecture (envelope times bounded response on z-score features)
+  is literally the similarity substitution: the network models `g / nu`. Input side
+  fully transformed; only a raw-coordinate residual pays the stiffness tax.
+- Startup anchor for validation: at small tauhat, `u * sqrt(tauhat)` plotted against
+  `z` must collapse onto `nu(-z, 1)`; departure measures distance from the startup
+  regime, not error, once the residual is clean.
+
+This is the low-tauhat sibling of the section 7 large-tauhat similarity ODE: the two
+asymptotic anchors now bracket the crossover at `tauhat ~ 1`, which is the only region
+with no closed-form structure.

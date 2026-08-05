@@ -24,7 +24,8 @@ class ExplorationPremium(nn.Module):
     Plain function on the wedge, no symmetry machinery (fold + wall losses
     carry S3); the feature list in forward; one GainedTanh MLP over the
     stacked features, Xavier-tanh init, shallow profile; the free-information
-    envelope of doc section 13 multiplying the tanh-bounded response.
+    envelope of doc section 13 multiplying the relu-squared rational response
+    (relu(r)**2 / (1 + relu(r)**2)).
     Warm-starting from the two_arm champion is deferred to v2 by the
     one-variable-at-a-time rule.
     """
@@ -44,13 +45,19 @@ class ExplorationPremium(nn.Module):
             nn.init.xavier_uniform_(
                 linear.weight, gain=1.0 if head else nn.init.calculate_gain("tanh")
             )
+
+            # Head bias 1: start alive everywhere. An all-dead relu**2 net
+            # has zero loss gradient and never recovers (CLAUDE.md traps).
+            if head is True:
+                nn.init.ones_(linear.bias)
             layers.append(linear)
             layers.append(GainedTanh(sizes[i + 1]))
 
-        # Unlike two_arm, the final GainedTanh stays: the response is strictly
-        # inside (-1, 1), so envelope * response can never escape the proven
-        # bound -- confinement as an architectural invariant, not a hope.
-        self.net = nn.Sequential(*layers)
+        # Linear head (final GainedTanh sliced off): the response is mapped
+        # through relu(r)**2 / (1 + relu(r)**2) in forward, which both
+        # confines u inside the proven bound and builds in the free-boundary
+        # regularity.
+        self.net = nn.Sequential(*layers[:-1])
 
         # Envelope scale, init 0: at scale exactly 1 the envelope is a proven
         # upper bound on the true premium (doc section 13), so the whole
@@ -108,17 +115,30 @@ class ExplorationPremium(nn.Module):
 
         # The free-information envelope (doc section 13): what learning could
         # possibly be worth, per challenger contrast. Decays in every far
-        # field; near-tight at the triple point.
+        # field. NOT tight at the triple point (corrected 2026-08-05): the
+        # max-splitting slack there is 1.17x to 1.87x with correlation, so
+        # the response must learn ~0.85 down to ~0.53 at startup, not 1.
         envelope = self.log_scale.exp() * (
             nu(m_b, precision_b.rsqrt()) + nu(m_c, precision_c.rsqrt())
         )
 
-        # (1 + tanh)/2 maps the response into (0, 1): the premium obeys both
-        # proven properties by construction, 0 <= u <= envelope. Exact zeros
-        # are only asymptotic, but unlike two_arm's flat envelope this one
-        # decays in the commit regions itself, so saturation is not asked to
-        # do the vanishing.
-        return envelope * (1.0 + response) / 2.0
+        # y/(1+y) with y = relu(r)**2 maps the response into [0, 1): both
+        # proven properties hold by construction, 0 <= u < envelope. The
+        # squared relu is the free-boundary trick (see two_arm's
+        # ExplorationPremium): committing all traffic to the leader observes
+        # no contrast, so v = commit solves the PDE exactly in the deep wedge
+        # and the true premium is exactly 0 there, pasting with u = u_m = 0
+        # and a jump only in the second derivative. relu(r)**2 has exactly
+        # that regularity on the learned zero set of r; a plain clip
+        # (first-derivative kink) would break the smooth pasting. Rational
+        # saturation, NOT tanh(y): tanh is float32-exactly 1 beyond r ~ 2.5
+        # and its gradient underflows, a cliff with no way back (the first
+        # three_arm start died there, r ~ 14 everywhere, only log_scale left
+        # trainable). y/(1+y) saturates with a polynomial tail, so gradients
+        # survive any overshoot.
+        response_squared = torch.relu(response) ** 2
+
+        return envelope * response_squared / (1.0 + response_squared)
 
 
 class ValueFunction(nn.Module):

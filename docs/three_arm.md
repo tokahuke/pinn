@@ -357,11 +357,61 @@ a premium when both treatments are hopeless.
 ## 14. Self-similar coordinates (implementation chart; derived and verified 2026-08-05)
 
 The dimensionless chart of sections 0-13 remains the reference frame for all
-thinking; this chart is an implementation detail for *grading residuals*: in
-it every derivative term of the PDE has bounded coefficients, so numerical
-differentiation error is never amplified by $1/\det T$. Derivation by agent,
-every identity verified in float64 against the raw-coordinate implementation
-(128 wedge states, max relative error $2.7\times10^{-13}$).
+thinking; this section exists to justify ONE line of code (the residual
+weight in `loss.py`) and to record what the derivation taught us. Derivation
+by agent, every identity verified in float64 against the raw-coordinate
+implementation (128 wedge states, max relative error $2.7\times10^{-13}$).
+
+**Motivation.** The training cloud spans many decades of information scale
+$S = \sqrt{\det T}$, and the residual $v - \max H$ has a natural magnitude
+that scales like $S^{-3/2}$: two states with the *same shape error* -- same
+lead in units of their own uncertainty, same precision shape -- produce
+residuals differing by orders of magnitude for pure bookkeeping reasons. An
+unweighted mean-of-squares lets the low-information decades shout down
+everything else; a per-point "relative residual" hack divides by a noisy
+local estimate. What we want is to measure every state's error against its
+own scale's natural units -- and we suspect (from two_arm's near
+self-similarity: the same tent shape at every scale) that a clean change of
+units exists.
+
+**Method.** Change variables so that each quantity is measured in the units
+its own state defines: means in posterior standard deviations (z-scores),
+the premium likewise, the information scale on a log clock, and the two
+leftover degrees of freedom of $T$ as scale-free shapes. Then push the
+section 4 PDE through the chain rule and see what the scale factors do.
+This is a units change, not new physics. Sections 14.1-14.2 give the two
+maps; 14.3 the transformed equation.
+
+**What the math answers back** (the payoff, in decreasing order of surprise):
+
+1. *The stiffness was notation.* Every derivative term of the transformed
+   PDE has bounded, $O(1)$ coefficients over the entire state space; the
+   whole scale dependence collects into a single factor $e^{s}$ multiplying
+   only derivative-free terms. The $1/\det T$ that made the raw equation
+   stiff across nine decades never touches a derivative. The one genuine
+   scale dependence that survives is the physics: how expensive information
+   is relative to patience (the explore/commit crossover).
+2. *The transformation is a weight, not code.* Point by point,
+   $\text{residual}_{\text{sim}} = S^{3/2}\,\text{residual}_{\text{raw}}$.
+   So grading the residual in the good units requires no transformed
+   operators in code -- one multiplication by the known scaling law, which
+   also retires the old guessed relative-residual scale (the weight is its
+   exact replacement).
+3. *The symmetry lives in the shapes.* Both wall surfaces, both wall
+   conditions, and both mirror maps are independent of $s$; the mirrors are
+   transpositions of the three pairwise variances (the treatment mirror is
+   just $r \to -r$). Scale and symmetry fully decouple.
+4. *The startup limit is exactly solvable -- and it corrects us.* As
+   $s \to -\infty$ the $e^{s}$ source dies and the premium must be a belief
+   martingale; the exact solution is $E[\max(0,\theta_b,\theta_c)]$,
+   satisfying interior and both walls. The nu-sum envelope solves the
+   interior but fails the control wall by exactly $\Phi(z_c')$ -- which is
+   how we caught the section 13 tightness error.
+5. *The limit of the trick.* One scalar clock cannot flatten the shape
+   directions: pairwise variances still diverge as $k \to 1$ or
+   $|r| \to \infty$. Normalizing by half their sum ($c$ below) spreads the
+   footing across shapes too and leaves a single scalar clock
+   $e^{s}/c = \det T/(I_{ab}+I_{ac}+I_{bc})$.
 
 ### 14.1 Map: dimensionless $\to$ self-similar
 
@@ -458,28 +508,42 @@ R_r=-\frac{(1-k^2)\sinh r}{\cosh r-k},\qquad
 R_k=\frac{(1-k^2)(1-k\cosh r)}{\cosh r-k}
 $$
 
-Structure worth registering:
+Bookkeeping details (the narrative above is the argument; these are the
+numbers behind it):
 
-- $e^{s}$ multiplies only derivative-free terms; every derivative coefficient
-  is bounded on the whole wedge ($P_b, P_c \in [0,1]$, $Q \in [-1,2]$,
-  $R_r \in [-1,1]$, $R_k \in [-0.385, 1]$). The full HJB adds
-  $\max_{\alpha \in \Delta}$; the seven candidates of section 10 apply
-  unchanged with $L_p = \tfrac{V_p}{2} M_p$ and linear coefficients
-  $e^{s}\sqrt{V_p}\,z + L_p$.
-- The $V_p$ prefactors are NOT bounded ($V_{ab}V_{ac} = 1/(1-k^2)$); the
-  recommended, argmax-invariant normalization divides the equation by
-  $c = (V_{ab}+V_{ac}+V_{bc})/2$, giving diffusion weights in $[0,1]$
-  summing to 1 and the single scalar clock
-  $e^{s}/c = \det T/(I_{ab}+I_{ac}+I_{bc})$.
-- Both wall conditions and both mirror maps are $s$-free; the mirrors act as
-  transpositions of $(V_{ab}, V_{ac}, V_{bc})$ (treatment mirror:
-  $r \to -r$).
-- Startup ($s \to -\infty$): the source dies and the exact stationary
-  solution is $g_0 = S^{1/2}\,E[\max(0,\theta_b,\theta_c)]$ — it satisfies
-  the interior AND both walls. The nu-sum envelope solves the startup
-  interior (it is a belief martingale) but fails the control wall by exactly
-  $\Phi(z_c')$ — see the section 13 correction.
+- Coefficient bounds over the whole wedge: $P_b, P_c \in [0,1]$,
+  $Q \in [-1,2]$, $R_r \in [-1,1]$, $R_k \in [-0.385, 1]$; the $M_{ab}$,
+  $M_{ac}$ coefficients are $1, 2k, k^2, 1-k^2, k(1-k^2)$.
+- The full HJB adds $\max_{\alpha \in \Delta}$: the seven candidates of
+  section 10 apply unchanged with $L_p = \tfrac{V_p}{2} M_p$ and linear
+  coefficients $e^{s}\sqrt{V_p}\,z + L_p$ (the max's argmax is invariant
+  under the common positive rescale, which is why the weight is legal).
 - Two_arm is recovered at $k = 0$ via $\log\hat\tau = s + r$.
+
+### 14.4 Postscript: which units to grade in (failure observed 2026-08-05)
+
+The first residual weight implemented was the equation's own units,
+$S^{3/2}/c$. A training run under it produced a well-scored net whose
+Hamiltonian was dead: all learning numbers $\approx 0$, policy = never
+explore. Mechanism: near the solution the residual carries the equation's
+full $S^{-3/2}$ magnitude, but the never-explore failure mode produces a
+residual of size $u \sim S^{-1/2}$ -- one power of $S$ smaller -- so graded
+in equation units it fades like $S$ and is nearly invisible below
+$\tau \sim 1$. (Two_arm escapes this because BC1 pins a premium derivative
+at every scale; the three-arm walls are lower-dimensional and cannot.)
+
+The correct grading is one power of $S$ lower -- PREMIUM units,
+
+$$
+w \;=\; \frac{S^{3/2}}{e_1(I)} \;=\; \frac{(\det T)^{3/4}}{\tau_{bb}+\tau_{cc}+\tau_{bc}},
+$$
+
+which keeps the never-explore residual $O(g)$-loud at every scale while
+retaining decade-fair footing for shape error (up to a benign tilt toward
+low-information states, the side the two_arm benchmark favors). This is
+exactly the analytic form of the old reactive scale $1 + |H - \text{commit}|$:
+that hack measured the premium magnitude per point empirically; the
+similarity analysis supplies the same magnitude as a law.
 
 ## To come
 

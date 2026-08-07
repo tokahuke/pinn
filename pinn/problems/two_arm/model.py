@@ -8,10 +8,14 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
+from pathlib import Path
 from torch import Tensor
+from typing import Self
 
 from ...net import GainedTanh
 from ...utils import nu
+from .sample import sample_sobol
+from .simplex import Maximum, maximize_quadratic
 
 # Width of the feature stack in ExplorationPremium.forward.
 FEATURE_COUNT = 4
@@ -91,11 +95,33 @@ class ExplorationPremium(nn.Module):
         self.net = nn.Sequential(*layers[:-1])
         self.log_scale = nn.Parameter(torch.zeros(()))
 
-    def forward(self, muhat: Tensor, tauhat: Tensor) -> Tensor:
-        features = torch.stack(
+        # Xavier assumes unit-variance inputs; the raw feature stack breaks
+        # that under the general sampling law, railing first-layer tanh units
+        # (see three_arm's model for the measurement). Calibrate a fixed
+        # per-feature scale from the law once at init; a buffer, so
+        # checkpoints carry it.
+        self.register_buffer("feature_scale", torch.ones(FEATURE_COUNT))
+
+        muhat, tauhat = sample_sobol(4096)
+        self.feature_scale = self._features(muhat, tauhat).std(dim=0).clamp_min(1e-3)
+
+    def _load_from_state_dict(self, state_dict: dict, prefix: str, *rest) -> None:
+        # Pre-calibration checkpoints trained with no feature scaling, which
+        # is exactly a scale of ones.
+        state_dict.setdefault(prefix + "feature_scale", torch.ones(FEATURE_COUNT))
+        super()._load_from_state_dict(state_dict, prefix, *rest)
+
+    def _features(self, muhat: Tensor, tauhat: Tensor) -> Tensor:
+        """
+        The raw (uncalibrated) feature stack.
+        """
+        return torch.stack(
             [muhat, tauhat.log(), muhat * tauhat.sqrt(), muhat * tauhat], dim=-1
         )
-        response = self.net(features).squeeze(-1)
+
+    def forward(self, muhat: Tensor, tauhat: Tensor) -> Tensor:
+        response = self.net(self._features(muhat, tauhat) / self.feature_scale)
+        response = response.squeeze(-1)
         envelope = self.log_scale.exp() * nu(-muhat, tauhat.rsqrt())
 
         response_squared = torch.relu(response) ** 2
@@ -103,7 +129,7 @@ class ExplorationPremium(nn.Module):
         return envelope * response_squared / (1.0 + response_squared)
 
 
-class ValueFunction(nn.Module):
+class DimensionlessValueFunction(nn.Module):
     """
     Dimensionless value on top of the premium: v = max(muhat, 0) + u.
 
@@ -116,13 +142,101 @@ class ValueFunction(nn.Module):
 
         self.premium = premium
 
+    @classmethod
+    def load(cls, path: Path) -> Self:
+        """
+        A trained checkpoint as a model, architecture inferred from the state
+        dict (hidden widths from the premium net's weight shapes).
+        """
+        state = torch.load(path)
+        hidden = [
+            w.shape[0]
+            for k, w in state.items()
+            if k.startswith("premium.net.") and k.endswith(".weight")
+        ][:-1]
+        value = cls(ExplorationPremium(hidden))
+        value.load_state_dict(state)
+
+        return value
+
     def forward(self, muhat: Tensor, tauhat: Tensor) -> Tensor:
         return torch.relu(muhat) + self.premium(muhat, tauhat)
 
+    def hamiltonian(self, muhat: Tensor, tauhat: Tensor) -> tuple[Tensor, Maximum]:
+        """
+        The HJB's two sides on the similarity chart (z, s), where the operator
+
+            M[g] = g_s + (1/2) g_zz + (z/2) g_z - (1/2) g
+
+        is O(1)-conditioned at every information level (docs/two_arm.md
+        section 8): the equation reads e^s (z + g) = max over alpha of
+        alpha e^s z + alpha(1-alpha) M[g]. Returns the left side and the
+        maximization, both graph-connected to the premium's parameters, so
+        pde_loss grades their gap and policy reads the argmax off the same
+        derivation. muhat >= 0 only, like forward.
+        """
+        z = (muhat * tauhat.sqrt()).detach().requires_grad_(True)
+        s = tauhat.log().detach().requires_grad_(True)
+
+        g = (s / 2).exp() * self.premium(z * (-s / 2).exp(), s.exp())
+        g_z, g_s = torch.autograd.grad(g.sum(), [z, s], create_graph=True)
+        (g_zz,) = torch.autograd.grad(g_z.sum(), z, create_graph=True)
+
+        m_of_g = g_s + 0.5 * g_zz + 0.5 * z * g_z - 0.5 * g
+        best = maximize_quadratic(-m_of_g, s.exp() * z + m_of_g)
+
+        return s.exp() * (z + g), best
+
+    def policy(self, muhat: Tensor, tauhat: Tensor) -> Tensor:
+        """
+        The argmax allocation (treatment share). muhat >= 0 only, like
+        forward; ValueFunction.policy handles the arm swap.
+        """
+        _, best = self.hamiltonian(muhat, tauhat)
+
+        return best.x.detach()
+
+
+class ValueFunction(nn.Module):
+    """
+    Deployment-facing value: real units in and out, either sign of the mean.
+
+    Wraps a trained DimensionlessValueFunction with the readout dictionary
+    (muhat = mu / (sigma sqrt(rho)), tauhat = rho sigma^2 tau,
+    V = (sigma / sqrt(rho)) vhat) and evaluates the premium at |muhat| -- the
+    true premium is even, and the net is only trained on muhat >= 0 (its
+    docstring's warning) -- while the commit term keeps the sign.
+    """
+
+    def __init__(
+        self, dimensionless: DimensionlessValueFunction, rho: float, sigma: float
+    ) -> None:
+        super().__init__()
+
+        self.dimensionless = dimensionless
+        self.rho = rho
+        self.sigma = sigma
+
+    def forward(self, mu: Tensor, tau: Tensor) -> Tensor:
+        muhat = mu / (self.sigma * self.rho**0.5)
+        tauhat = self.rho * self.sigma**2 * tau
+        vhat = torch.relu(muhat) + self.dimensionless.premium(muhat.abs(), tauhat)
+
+        return (self.sigma / self.rho**0.5) * vhat
+
+    def policy(self, mu: Tensor, tau: Tensor) -> Tensor:
+        """
+        The argmax allocation (treatment share): the dimensionless policy
+        evaluated at |muhat| and reflected back by the arm swap.
+        """
+        muhat = mu / (self.sigma * self.rho**0.5)
+        tauhat = self.rho * self.sigma**2 * tau
+        alpha = self.dimensionless.policy(muhat.abs(), tauhat)
+
+        return torch.where(muhat >= 0, alpha, 1.0 - alpha)
+
 
 if __name__ == "__main__":
-    from .sample import sample_sobol
-
     premium = ExplorationPremium([32, 16])
     muhat, tauhat = sample_sobol(1000)
     u = premium(muhat, tauhat)
@@ -136,7 +250,36 @@ if __name__ == "__main__":
 
     assert (u >= 0).all() and (u <= bound + 1e-6).all()
 
-    v = ValueFunction(premium)(muhat, tauhat)
+    v = DimensionlessValueFunction(premium)(muhat, tauhat)
 
     assert torch.allclose(v, torch.relu(muhat) + u)
+
+    # The deployment wrapper: at rho = sigma = 1 on muhat >= 0 it equals the
+    # dimensionless form; across the ridge V(mu) - V(-mu) is exactly the
+    # commit-value gap mu / rho; and units scale by the readout dictionary.
+    dimensionless = DimensionlessValueFunction(premium)
+    wrapper = ValueFunction(dimensionless, rho=1.0, sigma=1.0)
+
+    assert torch.allclose(wrapper(muhat, tauhat), v, atol=1e-6)
+    assert torch.allclose(
+        wrapper(muhat, tauhat) - wrapper(-muhat, tauhat), muhat, atol=1e-5
+    )
+
+    rho, sigma = 0.04, 2.5
+    real = ValueFunction(dimensionless, rho=rho, sigma=sigma)
+
+    assert torch.allclose(
+        real(muhat * sigma * rho**0.5, tauhat / (rho * sigma**2)),
+        (sigma / rho**0.5) * v,
+        rtol=1e-5,
+    )
+
+    # The policy: a valid allocation, antisymmetric across the ridge by the
+    # arm swap.
+    alpha = wrapper.policy(muhat, tauhat)
+
+    assert (alpha >= 0).all() and (alpha <= 1).all()
+    assert torch.allclose(
+        alpha + wrapper.policy(-muhat, tauhat), torch.ones_like(alpha)
+    )
     print("ok")

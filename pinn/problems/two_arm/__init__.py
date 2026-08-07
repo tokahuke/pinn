@@ -12,5 +12,5 @@ retraining under the nu envelope in progress.
 """
 
 from .loss import loss, objective, pde_loss, ridge_loss
-from .model import ExplorationPremium, ValueFunction
+from .model import DimensionlessValueFunction, ExplorationPremium, ValueFunction
 from .sample import sample_ridge, sample_sobol

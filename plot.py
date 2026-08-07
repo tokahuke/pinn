@@ -12,7 +12,7 @@ import torch
 from pathlib import Path
 from torch import Tensor
 
-from pinn.problems.two_arm import ExplorationPremium, ValueFunction
+from pinn.problems.two_arm import ExplorationPremium, DimensionlessValueFunction
 
 TAUHAT = 0.01
 
@@ -24,7 +24,7 @@ slice_tauhat = torch.full_like(slice_muhat, TAUHAT)
 
 
 def policy_and_residual(
-    value: ValueFunction, muhat: Tensor, tauhat: Tensor
+    value: DimensionlessValueFunction, muhat: Tensor, tauhat: Tensor
 ) -> tuple[Tensor, Tensor]:
     """
     alpha*(muhat, tauhat) and the HJB residual v - max_alpha H, same closed-form
@@ -119,7 +119,7 @@ def main(in_path: Path) -> None:
     """
     state = torch.load(in_path)
     hidden = [w.shape[0] for k, w in state.items() if k.endswith(".weight")][:-1]
-    value = ValueFunction(ExplorationPremium(hidden))
+    value = DimensionlessValueFunction(ExplorationPremium(hidden))
     value.load_state_dict(state)
 
     with torch.no_grad():

@@ -6,7 +6,6 @@ nothing about any particular problem; feed it a model and an objective.
 from __future__ import annotations
 
 import itertools
-import math
 import torch
 import torch.nn as nn
 
@@ -15,14 +14,6 @@ from torch import Tensor
 
 type LearningRate = float | Iterator[float]
 type Objective = Callable[[nn.Module, int | None], Tensor]
-
-
-def log_cosh(x: Tensor) -> Tensor:
-    """
-    Numerically stable log(cosh(x)): quadratic near 0, linear in the tails, so
-    outlier residuals lose their squared veto over the batch gradient.
-    """
-    return x + torch.nn.functional.softplus(-2.0 * x) - math.log(2.0)
 
 
 def decay(initial: float, half_life: int) -> Iterator[float]:

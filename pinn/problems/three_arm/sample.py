@@ -67,6 +67,12 @@ class Sample:
 
     def fold(self) -> Sample:
         """
+        Roll the batch into the fundamental wedge; see fold_ordered.
+        """
+        return self.fold_ordered()[0]
+
+    def fold_ordered(self) -> tuple[Sample, Tensor]:
+        """
         Roll the batch into the fundamental wedge {m_c <= m_b <= 0} by the arm
         relabel that sorts the three arm levels (0, m_b, m_c) descending: best
         becomes control, runner-up becomes b. In the pair coordinates of the precision,
@@ -74,9 +80,10 @@ class Sample:
         permutation of pair labels -- pair {i, j} lives at index i + j - 1 --
         so the taus fold by permuting three coordinates and reassembling. The
         premium is invariant under all of this (doc section 6), so training
-        and readout may fold freely. TODO before policy extraction: the
-        applied relabel is discarded here, but the readout of alpha* needs it
-        to un-permute the argmax back to physical arms.
+        folds freely. Policy readout needs the applied relabel back: the
+        returned order maps wedge role k to physical arm order[:, k]
+        (0 = a, 1 = b, 2 = c), so wedge-role allocations un-permute by
+        alpha_physical.scatter_(1, order, alpha_roles).
         """
         levels = torch.stack([torch.zeros_like(self.m_b), self.m_b, self.m_c], dim=-1)
         order = levels.argsort(dim=-1, descending=True)
@@ -102,7 +109,7 @@ class Sample:
         c_ac = pair_coordinate(order[:, 0], order[:, 2])
         c_bc = pair_coordinate(order[:, 1], order[:, 2])
 
-        return Sample(m_b, m_c, c_ab + c_bc, -c_bc, c_ac + c_bc)
+        return Sample(m_b, m_c, c_ab + c_bc, -c_bc, c_ac + c_bc), order
 
 
 @dataclass
@@ -220,8 +227,13 @@ if __name__ == "__main__":
     assert (det >= PRIOR_FLOOR**2 - 1e-6).all()
 
     # Fold: lands in the wedge, is idempotent, and preserves det T (the
-    # relabels are congruences by determinant -1/+1 matrices).
-    folded = draw.fold()
+    # relabels are congruences by determinant -1/+1 matrices). The order
+    # really sorts the physical levels descending.
+    folded, order = draw.fold_ordered()
+    physical_levels = torch.stack([torch.zeros_like(draw.m_b), draw.m_b, draw.m_c], -1)
+    sorted_levels = physical_levels.gather(-1, order)
+
+    assert (sorted_levels.diff(dim=-1) <= 1e-6).all()
 
     assert (folded.m_b <= 1e-6).all() and (folded.m_c <= folded.m_b + 1e-6).all()
     assert (folded.tau_bc <= 1e-6).all()

@@ -9,15 +9,18 @@ import torch
 
 from torch import Tensor
 
-from ...train import Objective, log_cosh
-from .model import ValueFunction
+from ...train import Objective
+from .model import DimensionlessValueFunction
 from .sample import sample_ridge, sample_sobol
 from .simplex import maximize_quadratic
 
 RIDGE_WEIGHT = 10.0
+POWER = 2.0
 
 
-def pde_loss(value: ValueFunction, muhat: Tensor, tauhat: Tensor) -> Tensor:
+def pde_loss(
+    value: DimensionlessValueFunction, muhat: Tensor, tauhat: Tensor
+) -> Tensor:
     """
     Squared residual of the HJB in similarity coordinates (docs/two_arm.md
     section 8), maximization kept explicit. With z = muhat sqrt(tauhat),
@@ -39,25 +42,26 @@ def pde_loss(value: ValueFunction, muhat: Tensor, tauhat: Tensor) -> Tensor:
     KNOWN DEGENERATE on its own: g = 0 (the never-explore solution) zeroes
     this residual exactly. The ridge loss breaks the degeneracy.
     """
-    z = (muhat * tauhat.sqrt()).detach().requires_grad_(True)
-    s = tauhat.log().detach().requires_grad_(True)
-
-    g = (s / 2).exp() * value.premium(z * (-s / 2).exp(), s.exp())
-    g_z, g_s = torch.autograd.grad(g.sum(), [z, s], create_graph=True)
-    (g_zz,) = torch.autograd.grad(g_z.sum(), z, create_graph=True)
-
-    m_of_g = g_s + 0.5 * g_zz + 0.5 * z * g_z - 0.5 * g
-    best = maximize_quadratic(-m_of_g, s.exp() * z + m_of_g)
+    # The derivation (similarity chart, M[g], interval max) lives on the
+    # model: one chain serves training and policy readout.
+    lhs, best = value.hamiltonian(muhat, tauhat)
 
     # No relative scale: the raw-coordinate loss needed one because its
     # coefficients spanned nine decades, but this equation self-normalizes
     # (g is architecturally bounded by nu(-z, 1), the operator coefficients
-    # are O(1), the dead region is exactly zero), so the plain residual under
-    # log-cosh is already fair across the domain.
-    return log_cosh(s.exp() * (z + g) - best.value).mean()
+    # are O(1), the dead region is exactly zero), so the plain residual is
+    # already fair across the domain. Power-mean attention as in three_arm:
+    # the p-mean's gradient weights each point by (g / M_p)^(P-1), size
+    # relative to the batch's own population, annealing back to the plain
+    # mean as the tail thins; P = 1 recovers mean-of-squares exactly.
+    # Normalized by the detached batch mean so pow(P) sees O(1) numbers.
+    graded = (lhs - best.value).pow(2)
+    scale = graded.mean().detach().clamp_min(1e-30)
+
+    return scale * (graded / scale).pow(POWER).mean().pow(1.0 / POWER)
 
 
-def ridge_loss(value: ValueFunction, ridge_tauhat: Tensor) -> Tensor:
+def ridge_loss(value: DimensionlessValueFunction, ridge_tauhat: Tensor) -> Tensor:
     """
     BC1, the ridge condition that rules out the never-explore solution:
     du/dmuhat = -1/2 at muhat = 0, imposed on the premium (smooth there; the
@@ -71,7 +75,7 @@ def ridge_loss(value: ValueFunction, ridge_tauhat: Tensor) -> Tensor:
 
 
 def loss(
-    value: ValueFunction,
+    value: DimensionlessValueFunction,
     muhat: Tensor,
     tauhat: Tensor,
     ridge_tauhat: Tensor,
@@ -95,7 +99,7 @@ def objective(batch: int = 1024) -> Objective:
     scored by loss.
     """
 
-    def step(value: ValueFunction, iteration: int | None) -> Tensor:
+    def step(value: DimensionlessValueFunction, iteration: int | None) -> Tensor:
         muhat, tauhat = sample_sobol(batch)
         ridge_tauhat = sample_ridge(batch // 4)
 
@@ -115,9 +119,14 @@ if __name__ == "__main__":
         def forward(self, muhat: Tensor, tauhat: Tensor) -> Tensor:
             return -0.5 * muhat + 0.0 * tauhat
 
-    assert ridge_loss(ValueFunction(_RidgeExact()), torch.rand(64) + 0.1).item() < 1e-12
+    assert (
+        ridge_loss(
+            DimensionlessValueFunction(_RidgeExact()), torch.rand(64) + 0.1
+        ).item()
+        < 1e-12
+    )
 
-    value = ValueFunction(ExplorationPremium([16, 16]))
+    value = DimensionlessValueFunction(ExplorationPremium([16, 16]))
     objective_value = objective(batch=256)(value, None)
 
     assert (

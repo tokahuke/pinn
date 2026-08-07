@@ -10,82 +10,57 @@ import torch.nn as nn
 
 from torch import Tensor
 
-from ...train import Objective, log_cosh
-from .model import ValueFunction
+from ...train import Objective
+from .model import DimensionlessValueFunction
 from .sample import RidgeSample, Sample
-from .simplex import maximize_quadratic
 
 TIE_WEIGHT = 10.0
+POWER = 2.0
 
 
-def pde_loss(value: ValueFunction, draw: Sample) -> Tensor:
+def pde_loss(value: DimensionlessValueFunction, draw: Sample) -> Tensor:
     """
     Interior HJB residual in value form (doc sections 4, 7, 10), units
     rho = sigma = 1, i.e. the dimensionless form (doc section 11):
-    v = max over the simplex of alpha.m + pairwise learning terms.
+    v = max over the simplex of alpha.m + pairwise learning terms; graded in
+    similarity PREMIUM units (doc section 14 and its postscript).
 
     KNOWN DEGENERATE on its own: the commit envelope v = max(0, m_b, m_c)
     zeroes this residual exactly (the never-explore solution), just as the
     two_arm residual was degenerate before BC1. The tie losses of doc
     section 12 break the degeneracy.
     """
-    m_b, m_c = draw.m_b.requires_grad_(True), draw.m_c.requires_grad_(True)
-    tau_bb = draw.tau_bb.requires_grad_(True)
-    tau_bc = draw.tau_bc.requires_grad_(True)
-    tau_cc = draw.tau_cc.requires_grad_(True)
-
-    v = value(m_b, m_c, tau_bb, tau_bc, tau_cc)
-    v_mb, v_mc, v_tbb, v_tbc, v_tcc = torch.autograd.grad(
-        v.sum(),
-        [m_b, m_c, tau_bb, tau_bc, tau_cc],
-        create_graph=True,
-        allow_unused=True,
-        materialize_grads=True,
+    # The derivation (learning numbers, Hamiltonian, simplex max) lives on
+    # the model: one chain serves training and policy readout.
+    v, best = value.hamiltonian(
+        draw.m_b, draw.m_c, draw.tau_bb, draw.tau_bc, draw.tau_cc
     )
-    v_mbmb, v_mbmc = torch.autograd.grad(
-        v_mb.sum(),
-        [m_b, m_c],
-        create_graph=True,
-        allow_unused=True,
-        materialize_grads=True,
-    )
-    (v_mcmc,) = torch.autograd.grad(
-        v_mc.sum(), [m_c], create_graph=True, allow_unused=True, materialize_grads=True
-    )
+    det = draw.tau_bb * draw.tau_cc - draw.tau_bc**2
 
-    # Pairwise learning numbers (doc section 10): for pair direction vector
-    # dir, w = T^{-1} dir, and L = mean-diffusion Ito term (1/2) w' D2m(v) w
-    # plus the precision-drift term (dir-form on dv/dT).
-    det = tau_bb * tau_cc - tau_bc**2
+    # Similarity grading in PREMIUM units (doc section 14 postscript): one
+    # power of S below the equation's own units, so the never-explore mode
+    # (residual ~ u ~ S^(-1/2), one power smaller than the equation scale)
+    # stays loudly visible at every information level -- graded in equation
+    # units it fades like S and a dead-Hamiltonian net scores well (observed
+    # 2026-08-05). This weight is the analytic form of the old reactive
+    # 1 + |H - commit| scale. The denominator is the sum of the three
+    # pairwise precisions (the tau_bc terms telescope); S3-invariant.
+    weight = (det**0.75 / (draw.tau_bb + draw.tau_cc + draw.tau_bc)).detach()
 
-    def mean_diffusion(w_b: Tensor, w_c: Tensor) -> Tensor:
-        return 0.5 * (w_b**2 * v_mbmb + 2.0 * w_b * w_c * v_mbmc + w_c**2 * v_mcmc)
+    # Power-mean attention: a plain mean starves the fat-tail subpopulation
+    # (the b/c-flux blob, a flat shelf at 5-6 sd) of gradient once the bulk
+    # converges. The p-mean's gradient weights each point by (g / M_p)^(P-1)
+    # -- size relative to the batch's own population, annealing back to the
+    # plain mean as the tail thins -- while staying a mean: same units, same
+    # magnitude, P = 1 recovers mean-of-squares exactly. Normalized by the
+    # detached batch mean so pow(P) sees O(1) numbers, not float32 dust.
+    graded = (weight * (v - best.value)).pow(2)
+    scale = graded.mean().detach().clamp_min(1e-30)
 
-    l_ab = mean_diffusion(tau_cc / det, -tau_bc / det) + v_tbb
-    l_ac = mean_diffusion(-tau_bc / det, tau_bb / det) + v_tcc
-    l_bc = mean_diffusion((tau_cc + tau_bc) / det, -(tau_bb + tau_bc) / det) + (
-        v_tbb + v_tcc - v_tbc
-    )
-
-    # Section-10 Hamiltonian H(b, c) = b (m_b + l_ab) + c (m_c + l_ac)
-    # - l_ab b^2 - l_ac c^2 + (l_bc - l_ab - l_ac) b c, handed to plain
-    # calculus in triangle-quadratic coefficients; best.value is max H and
-    # (best.x, best.y) the argmax (alpha_b, alpha_c).
-    best = maximize_quadratic(-l_ab, -l_ac, l_bc - l_ab - l_ac, m_b + l_ab, m_c + l_ac)
-
-    # Relative residual under log-cosh, the two_arm recipe: relative error
-    # against a detached local scale, linear tails for outliers. The scale
-    # uses the regret-form magnitude |H - commit| (not |H|): it is invariant
-    # under arm relabels, so the whole loss inherits the S3 symmetry instead
-    # of just the residual.
-    commit = torch.relu(torch.maximum(m_b, m_c))
-    scale = 1.0 + (best.value - commit).detach().abs()
-    residual = log_cosh((v - best.value) / scale).mean()
-
-    return residual
+    return scale * (graded / scale).pow(POWER).mean().pow(1.0 / POWER)
 
 
-def control_tie_loss(value: ValueFunction, draw: RidgeSample) -> Tensor:
+def control_tie_loss(value: DimensionlessValueFunction, draw: RidgeSample) -> Tensor:
     """
     Wall condition on the control tie {m_b = 0} (doc section 12), the
     degeneracy breaker. Pair-sampled: each wall point is scored together with
@@ -126,7 +101,7 @@ def control_tie_loss(value: ValueFunction, draw: RidgeSample) -> Tensor:
     return (normal + mirror_normal + mirror_tangent - 1.0).pow(2).mean()
 
 
-def treatment_tie_loss(value: ValueFunction, draw: RidgeSample) -> Tensor:
+def treatment_tie_loss(value: DimensionlessValueFunction, draw: RidgeSample) -> Tensor:
     """
     Wall condition on the treatment tie {m_b = m_c} (doc section 12), the
     mirror condition. Pair-sampled under the b<->c swap,
@@ -158,7 +133,7 @@ def treatment_tie_loss(value: ValueFunction, draw: RidgeSample) -> Tensor:
 
 
 def loss(
-    value: ValueFunction,
+    value: DimensionlessValueFunction,
     draw: Sample,
     control_draw: RidgeSample,
     treatment_draw: RidgeSample,
@@ -208,7 +183,7 @@ if __name__ == "__main__":
     # The commit envelope solves the interior PDE exactly (the documented
     # degeneracy), which doubles as an end-to-end test of the derivative ->
     # L -> Hamiltonian pipeline: zero premium must give ~zero pde loss.
-    zero = ValueFunction(_ZeroPremium())
+    zero = DimensionlessValueFunction(_ZeroPremium())
     envelope_loss = pde_loss(zero, Sample.draw(2048))
 
     assert envelope_loss.item() < 1e-8, envelope_loss.item()
@@ -234,24 +209,26 @@ if __name__ == "__main__":
             return m_b + m_c
 
     assert (
-        control_tie_loss(ValueFunction(_HalfB()), RidgeSample.control_tie(64)).item()
+        control_tie_loss(
+            DimensionlessValueFunction(_HalfB()), RidgeSample.control_tie(64)
+        ).item()
         < 1e-10
     )
     assert (
         treatment_tie_loss(
-            ValueFunction(_HalfB()), RidgeSample.treatment_tie(64)
+            DimensionlessValueFunction(_HalfB()), RidgeSample.treatment_tie(64)
         ).item()
         > 0.1
     )
     assert (
         treatment_tie_loss(
-            ValueFunction(_Symmetric()), RidgeSample.treatment_tie(64)
+            DimensionlessValueFunction(_Symmetric()), RidgeSample.treatment_tie(64)
         ).item()
         < 1e-10
     )
     assert (
         control_tie_loss(
-            ValueFunction(_Symmetric()), RidgeSample.control_tie(64)
+            DimensionlessValueFunction(_Symmetric()), RidgeSample.control_tie(64)
         ).item()
         > 0.1
     )
@@ -265,7 +242,7 @@ if __name__ == "__main__":
         def forward(self, *state: Tensor) -> Tensor:
             return self.head(torch.stack(state, dim=-1)).squeeze(-1).tanh()
 
-    tiny = ValueFunction(_TinyPremium())
+    tiny = DimensionlessValueFunction(_TinyPremium())
     tiny_loss = loss(
         tiny,
         Sample.draw(512),
@@ -288,7 +265,7 @@ if __name__ == "__main__":
         ) -> Tensor:
             return (tbb * tcc - tbc**2).tanh()
 
-    invariant = ValueFunction(_InvariantPremium())
+    invariant = DimensionlessValueFunction(_InvariantPremium())
     batch = Sample.draw(2048)
     swapped = Sample(  # b <-> c relabel
         batch.m_c, batch.m_b, batch.tau_cc, batch.tau_bc, batch.tau_bb

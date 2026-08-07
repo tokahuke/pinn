@@ -13,6 +13,9 @@ dependencies = [
     "click (>=8.4.2,<9.0.0)"
 ]
 
+[project.scripts]
+arena = "pinn.arena.main:cli"
+
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]

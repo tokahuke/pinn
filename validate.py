@@ -11,14 +11,14 @@ from pathlib import Path
 from torch import Tensor
 
 from pinn.problems.two_arm import sample_sobol
-from pinn.problems.two_arm import ExplorationPremium, ValueFunction
+from pinn.problems.two_arm import ExplorationPremium, DimensionlessValueFunction
 
 state = torch.load(Path("data") / "two_arm.pt")
 hidden = [weight.shape[0] for key, weight in state.items() if key.endswith(".weight")][
     :-1
 ]
 
-value = ValueFunction(ExplorationPremium(hidden))
+value = DimensionlessValueFunction(ExplorationPremium(hidden))
 value.load_state_dict(state)
 
 

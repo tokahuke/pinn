@@ -13,7 +13,12 @@ from pathlib import Path
 
 from pinn.train import decay, train
 
-HIDDEN = [32, 512,]
+HIDDEN = [
+    64,
+    64,
+    64,
+]
+KINKS = 16
 
 
 @click.command()
@@ -47,17 +52,18 @@ def main(problem: str, in_path: Path | None, out_path: Path | None) -> None:
     if out_path is None:
         out_path = Path("data") / f"{problem}.pt"
 
+    extra = {"kinks": KINKS} if problem == "three_arm" else {}
+
     if in_path is None:
-        value = module.ValueFunction(module.ExplorationPremium(HIDDEN))
+        value = module.DimensionlessValueFunction(
+            module.ExplorationPremium(HIDDEN, **extra)
+        )
     else:
-        state = torch.load(in_path)
-        hidden = [w.shape[0] for k, w in state.items() if k.endswith(".weight")][:-1]
-        value = module.ValueFunction(module.ExplorationPremium(hidden))
-        value.load_state_dict(state)
+        value = module.DimensionlessValueFunction.load(in_path, **extra)
 
     try:
         for _ in itertools.islice(
-            train(value, module.objective(batch=1024), lr=decay(3e-4, 100_000)), None
+            train(value, module.objective(batch=2048), lr=decay(3e-4, 100_000)), None
         ):
             pass
     except KeyboardInterrupt:

@@ -1,5 +1,9 @@
 # PINN for optimal decisions in your business
 
+![Thirty A/B/C tests deciding themselves](docs/hero.png)
+
+*Every line is one A/B/C test, drifting as evidence arrives; its dot is the decision, the arm the test shipped. The colored field underneath is the trained network's policy, and the boundaries where the lines stop are where it judges that more evidence is no longer worth its price.*
+
 If you love money, you will love this repo! It's all about money and decision-making, things that Very-Important HiGh StAkEs people do. Naah! Just kidding. This is just for computers to take those decisions for you. For example, the age-old question: AB-testing. The blue button or the red button? In this repo, I tackle AB, ABC and more decision processes using the final-boss of all decision methodologies: [the HJB equation](https://en.wikipedia.org/wiki/Hamilton%E2%80%93Jacobi%E2%80%93Bellman_equation). If you are spooked by horrible equations, don't click!
 
 Since you might be a very busy person, here is the gist of it: I did the complex part so that you may have fun with a real piece of engineering. To _use_ the code in this repo, it's quite easy: you just need the trained model and off you go (see usage below). Yes, it's a Neural Net trained for _your_ problem. No, I didn't invade your company's server and steal your datasets. The neural networks here work as _controllers_ to solve a complicated, but well-known problem, such as AB testing. Just plug-and-play and let the neurons do the rest.

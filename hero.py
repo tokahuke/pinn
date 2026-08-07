@@ -8,12 +8,14 @@ posterior dynamics under the champion's policy.
 
 from __future__ import annotations
 
+import io
 
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
 from matplotlib.collections import LineCollection
+from PIL import Image
 
 
 from pinn.problems.three_arm import DimensionlessValueFunction, ValueFunction
@@ -114,13 +116,15 @@ def main() -> None:
     )
     image = field(value)
     trails, arms = simulate(value)
+    shown = np.clip(image, 0, 1) ** 0.92
 
     fig, ax = plt.subplots(figsize=(16, 8))
     ax.imshow(
-        np.clip(image, 0, 1) ** 0.92,
+        shown,
         origin="lower",
         extent=[-SPAN, SPAN, -SPAN, SPAN],
         interpolation="bilinear",
+        aspect="auto",
     )
 
     for trail, arm in zip(trails, arms):
@@ -138,10 +142,15 @@ def main() -> None:
                 points[1:-1, column] = interior[1:-1]
 
         segments = np.stack([points[:-1], points[1:]], axis=1)
-        colors = np.ones((len(segments), 4))
-        colors[:, 3] = np.linspace(0.10, 0.85, len(segments))
+
+        # Evolving thickness carries the arrow of time: each test is born as
+        # a hairline and commits at full weight. One opaque color, so there
+        # is no gradient for the eye to average and no compositing to bead.
+        widths = np.linspace(0.35, 2.6, len(segments))
         ax.add_collection(
-            LineCollection(segments, colors=colors, linewidths=2.5, capstyle="round")
+            LineCollection(
+                segments, colors="white", linewidths=widths, capstyle="round"
+            )
         )
 
         if arm >= 0:
@@ -160,8 +169,14 @@ def main() -> None:
     ax.set_ylim(-0.92, 0.96)
     ax.axis("off")
     fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
-    fig.savefig("docs/hero.png", dpi=150, facecolor="white")
+
+    # Supersample 2x and downsample with Lanczos: the hairline ends of the
+    # tapers live below one output pixel, where direct rendering aliases.
+    buffer = io.BytesIO()
+    fig.savefig(buffer, format="png", dpi=300, transparent=True)
     plt.close(fig)
+    buffer.seek(0)
+    Image.open(buffer).resize((2400, 1200), Image.LANCZOS).save("docs/hero.png")
     print("saved docs/hero.png")
 
 

@@ -30,8 +30,8 @@ coordinates (`muhat`, `tauhat`). Earlier drafts used `U` for the even part
 - The arena (policy shoot-out vs TS/ETC/elimination on discrete epochs,
   regret vs true effects): `poetry run arena simulate <out.pkl> --problem
   two_arm|three_arm --rho ... --size N --workers K`, then `poetry run arena
-  analyze <out.pkl>`. Production parameter values are internal (project
-  memory), never committed.
+  analyze <out.pkl>`. Realistic parameter values live outside the repo
+  (project memory), never committed.
 - Each module in `pinn/` carries an `assert`-based self-check:
   `poetry run python -m pinn.problems.two_arm.loss`, `poetry run python -m
   pinn.arena.three_arm`, `poetry run python -m pinn.net`.
@@ -112,8 +112,8 @@ Organized one-module-per-problem; the separation should be kept:
 - `pinn/train.py` — generic trainer: endless-generator `train(model, objective,
   lr)` (consumer stops via `itertools.islice`; mutates the model in place; `lr`
   is a float or a rate generator, see `decay`; a finite generator ends training).
-- `pinn/arena/` — the policy arena (imported from the external
-  prior-baselines study, torch-translated): `harness.py` the generic
+- `pinn/arena/` — the policy arena (a discrete-epoch policy-benchmark
+  harness): `harness.py` the generic
   N-arm core (simplex-vector allocations, discounted regret vs the oracle,
   paired seeds per rep, soft commit time `N(1 - sum a^2)/(N - 1)`),
   `two_arm.py`/`three_arm.py` per-problem zoos (ETC, Thompson via exact
@@ -146,12 +146,12 @@ Champions (all in gitignored `data/`, backed up to the GitHub release
   closing; communal branch anatomy, no junction specialist — sequencing is
   load-bearing, see learnings section 8).
 
-The headline (2026-08-06): in the arena, at production-calibrated parameters
-(values in project memory, not committed), the two_arm PINN policy beat
-Thompson sampling — the previously unbeaten champion of the external
-prior-baselines study — by ~20% of discounted regret while buying less
-than half the information (precision time 332 vs 717), with the other
-baselines reproduced to within a fraction of a CI. Three-arm arena results
+The headline (2026-08-06): in the arena, at realistic parameters (values in
+project memory, not committed), the two_arm PINN policy beat
+Thompson sampling — the strongest practical baseline — by ~20% of
+discounted regret while buying less than half the information (precision
+time 332 vs 717), with the other baselines reproduced against an earlier
+private study to within a fraction of a CI. Three-arm arena results
 pending.
 
 Open frontiers:

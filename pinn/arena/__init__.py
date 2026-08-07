@@ -1,5 +1,5 @@
 """
-The policy arena, grown from ~/workspace/prior-baselines: discrete-epoch
+The policy arena: discrete-epoch
 simulation, discounted regret against an oracle, per-problem policy zoos
 (two_arm, three_arm), and the PINN entrants. Generic core in harness.py;
 import a problem module explicitly to reach its zoo -- the CLI's reflection

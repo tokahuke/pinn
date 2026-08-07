@@ -310,8 +310,8 @@ bucketed by the suspected cause.
   environment knowledge; soft commit time N(1 - sum a^2)/(N - 1) is the
   uniform-equivalent information spend, comparable across arms counts. The
   payoff here: the HJB policy beat Thompson sampling — the previously
-  unbeaten champion — by ~20% of discounted regret at production-calibrated
-  parameters while buying less than half the information, BECAUSE it prices
+  unbeaten champion — by ~20% of discounted regret at realistic parameters
+  while buying less than half the information, BECAUSE it prices
   when to stop buying; and it did so from the fitted value function this
   playbook spent a week complaining about.
 

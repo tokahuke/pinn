@@ -1,3 +1,17 @@
+# PINN for optimal decisions in your business
+
+If you love money, you will love this repo! It's all about money and decision-making, things that Very-Important HiGh StAkEs people do. Naah! Just kidding. This is just for computers to take those decisions for you. For example, the age-old question: AB-testing. The blue button or the red button? In this repo,I tackle AB, ABC and more decision processes using the final-boss of all decision methodologies: [the HJB equation](https://en.wikipedia.org/wiki/Hamilton%E2%80%93Jacobi%E2%80%93Bellman_equation). If you are spooked by horrible equations, don't click!
+
+Since you might be a very busy person, here is the gist of it: I did the complex part so that you may have fun with a real piece of engineering. To _use_ the code in this repo, it's quite easy: you just need the trained model and off you go (see usage below). Yes, it's a Neural Net trained for _your_ problem. No, I didn't invade your company's server and stole your datasets. The neural networks here work as _controllers_ to solve a complicated, but well-known problem, such as AB testing. Just plug-and-play and let the neurons do the rest.
+
+## But is it any good?
+
+Yes, it even beats Thompson Sampling for a simple AB test. Oh! If you have been doing Z-test with p-value=5%, I have bad news for you. It might be a great way to do a Phase III trial, but not for [running decisions all the time](https://en.wikipedia.org/wiki/Data_dredging#Optional_stopping). Anyway, here is the roster:
+
+![Arena results](docs/arena_two_arm.png)
+
+Slightly better than TS in terms of "gains left on the table" (regret) and with the added benefit that _it actually stops_. It also needs to explore less in total. TS, even though it can deliver the goods, is know to be quite the over-curious explorer and the neural network fixes that.  
+
 # pinn
 
 Physics-informed neural networks for the optimal allocation of experiment

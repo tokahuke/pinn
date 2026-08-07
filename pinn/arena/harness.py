@@ -57,9 +57,9 @@ def optimal_deadline(rho: float, horizon: int) -> int:
     the worst case over d sits at d ~ T**(-1/3). T is the effective horizon, the
     shorter of the discount's 1/gamma and the hard horizon.
 
-    THE LEADING CONSTANT OF 1 IS CALIBRATED, NOT DERIVED (see the source repo's
-    sweep: c = 1 costs at most 1.13x the oracle deadline's regret over
-    effect_std/sigma in 0.03..0.30).
+    THE LEADING CONSTANT OF 1 IS CALIBRATED, NOT DERIVED: swept against the
+    exact optimum, c = 1 costs at most 1.13x the oracle deadline's regret
+    over effect_std/sigma in 0.03..0.30.
     """
     effective = min(float(horizon), 1.0 / (1.0 - rho))
 

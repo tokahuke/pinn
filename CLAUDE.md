@@ -150,9 +150,8 @@ The headline (2026-08-06): in the arena, at realistic parameters (values in
 project memory, not committed), the two_arm PINN policy beat
 Thompson sampling — the strongest practical baseline — by ~20% of
 discounted regret while buying less than half the information (precision
-time 332 vs 717), with the other baselines reproduced against an earlier
-private study to within a fraction of a CI. Three-arm arena results
-pending.
+time 332 vs 717), with baseline values stable across independent sweeps.
+Three-arm arena results pending (see docs/arena_results.md once run).
 
 Open frontiers:
 - The low-tauhat floor decade: below `tauhat ~ 1e-2` the two_arm champion's

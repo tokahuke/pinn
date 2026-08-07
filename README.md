@@ -1,8 +1,8 @@
 # PINN for optimal decisions in your business
 
-If you love money, you will love this repo! It's all about money and decision-making, things that Very-Important HiGh StAkEs people do. Naah! Just kidding. This is just for computers to take those decisions for you. For example, the age-old question: AB-testing. The blue button or the red button? In this repo,I tackle AB, ABC and more decision processes using the final-boss of all decision methodologies: [the HJB equation](https://en.wikipedia.org/wiki/Hamilton%E2%80%93Jacobi%E2%80%93Bellman_equation). If you are spooked by horrible equations, don't click!
+If you love money, you will love this repo! It's all about money and decision-making, things that Very-Important HiGh StAkEs people do. Naah! Just kidding. This is just for computers to take those decisions for you. For example, the age-old question: AB-testing. The blue button or the red button? In this repo, I tackle AB, ABC and more decision processes using the final-boss of all decision methodologies: [the HJB equation](https://en.wikipedia.org/wiki/Hamilton%E2%80%93Jacobi%E2%80%93Bellman_equation). If you are spooked by horrible equations, don't click!
 
-Since you might be a very busy person, here is the gist of it: I did the complex part so that you may have fun with a real piece of engineering. To _use_ the code in this repo, it's quite easy: you just need the trained model and off you go (see usage below). Yes, it's a Neural Net trained for _your_ problem. No, I didn't invade your company's server and stole your datasets. The neural networks here work as _controllers_ to solve a complicated, but well-known problem, such as AB testing. Just plug-and-play and let the neurons do the rest.
+Since you might be a very busy person, here is the gist of it: I did the complex part so that you may have fun with a real piece of engineering. To _use_ the code in this repo, it's quite easy: you just need the trained model and off you go (see usage below). Yes, it's a Neural Net trained for _your_ problem. No, I didn't invade your company's server and steal your datasets. The neural networks here work as _controllers_ to solve a complicated, but well-known problem, such as AB testing. Just plug-and-play and let the neurons do the rest.
 
 ## But is it any good?
 
@@ -10,63 +10,120 @@ Yes, it even beats Thompson Sampling for a simple AB test. Oh! If you have been 
 
 ![Arena results](docs/arena_two_arm.png)
 
-Slightly better than TS in terms of "gains left on the table" (regret) and with the added benefit that _it actually stops_. It also needs to explore less in total. TS, even though it can deliver the goods, is know to be quite the over-curious explorer and the neural network fixes that.  
+| policy | regret (Thompson = 1.00) | wrong commits | commits | evidence (Thompson = 1.00) |
+|---|---|---|---|---|
+| PINN (this repo) | **0.80** | 6.6% | 99.2% | **0.46** |
+| Thompson sampling | 1.00 | 0.0% | never | 1.00 |
+| explore-then-commit | 1.65 | 13.0% | 100% | 0.33 |
+| z-test at 5% | 1.81 | 10.7% | 93.7% | 0.67 |
 
-# pinn
+Slightly better than TS in terms of "gains left on the table" (regret) and with the added benefit that _it actually stops_. It also needs to explore less in total. TS, even though it can deliver the goods, is known to be quite the over-curious explorer and the neural network fixes that. Full tables, including the three-arm arena, live in [docs/arena_results.md](docs/arena_results.md).
 
-Physics-informed neural networks for the optimal allocation of experiment
-traffic: given noisy A/B(/C) test observations, a discount rate, and the
-option to commit to an arm forever, how should traffic be split *right now*?
-That question is a Hamilton-Jacobi-Bellman free-boundary problem; this repo
-solves it by training a network on the PDE itself — no simulation data — and
-reads the allocation policy off the trained value function's derivatives.
+## Beyond just AB
+
+### We can do ABC as well. Look at the policy atlas for it:
 
 ![The learned three-arm allocation policy](docs/policy_atlas.png)
 
-The picture is the trained three-arm policy: each point is a belief state
-(posterior means of challengers B and C relative to control), each color is
-the traffic split played there. With little information, the policy blends —
-paying for evidence on every arm at once. As information accumulates, three
-commit basins crystallize, separated by narrowing exploration corridors that
-meet at the triple point where all three arms are still in play. Nobody drew
-those boundaries; they are free boundaries of the HJB equation, found by the
-network.
+This "Gaussian blur"-thingy vanishing with information shows the net being more confident the more information you pass to it. And its performance is even better than for the AB test:
 
-## Does it matter?
+![A/B/C arena results](docs/arena_three_arm.png)
 
-![Arena results](docs/arena_two_arm.png)
+| policy | regret (Thompson = 1.00) | wrong commits | commits | evidence (Thompson = 1.00) |
+|---|---|---|---|---|
+| PINN (this repo) | **0.77** | 10.4% | 99.8% | **0.38** |
+| Thompson sampling | 1.00 | 0.0% | never | 1.00 |
+| elimination at 5% (generalized z-test) | 1.53 | 11.8% | 90.5% | 0.71 |
+| explore-then-commit | 1.81 | 20.9% | 100% | 0.29 |
 
-In a discrete-epoch simulation harness (`pinn/arena`) against the true
-effect, with paired seeds and realistic economics, the PINN
-policy pays **20% less discounted regret than Thompson sampling** — the
-strongest practical baseline, which itself beats explore-then-commit and
-peeking z-tests by wide margins — while buying **less than half the
-information**. The mechanism: Thompson sampling prices uncertainty but not
-patience; the HJB value function prices both, so it exploits earlier and
-knows when further evidence stops being worth its discounted cost.
+What about ABCD? Man, the equations are *gnarly* for ABC already and should just be impossible for ABCD, but if you want to build it, you are welcome to contribute with a PR. There is already some support and some tips about how to do it in
+[docs/learnings.md](docs/learnings.md). However, be warned that PINNs do not scale to even hundreds of input dimensions and the number of features you have to feed the network is quadratic.
+
+### More coming in the future
+
+There are other related problems I plan to tackle in the future. They are still stochastic models, but stray away from bandit problems. Star this repo and stay tuned!
 
 ## What's inside
 
-- `pinn/problems/two_arm`, `pinn/problems/three_arm` — the trainable models
-  (dimensionless, wedge-quotiented by the problems' exact symmetries),
-  samplers, and PDE losses. The math lives in `docs/two_arm.md` and
+A quick map of the repo, for the curious:
+
+- `pinn/problems/two_arm` and `pinn/problems/three_arm`: the trainable models,
+  samplers, and PDE losses (dimensionless, wedge-quotiented by the problems'
+  exact symmetries). The math lives in `docs/two_arm.md` and
   `docs/three_arm.md`; the transferable method in `docs/learnings.md`.
-- `pinn/arena` — the policy shoot-out: N-arm regret harness, baseline zoos
-  (Thompson, explore-then-commit, z-test/elimination), and the PINN entrant.
-  `poetry run arena simulate ... && poetry run arena analyze ...`.
-- `train.py`, `probes.py`, `plot.py`, `benchmark3.py`, `validate.py` — CLIs
+- `pinn/arena`: the policy shoot-out. An N-arm regret harness, the baseline
+  zoo (Thompson, explore-then-commit, z-test/elimination), and the PINN
+  entrant. Run it with `poetry run arena simulate ...` and then
+  `poetry run arena analyze ...`.
+- `train.py`, `probes.py`, `plot.py`, `benchmark3.py`, `validate.py`: CLIs
   for training and diagnostics.
 
-Trained checkpoints are published as GitHub release assets
-(`checkpoints-2026-08-06`); drop them in `data/` and every CLI finds them.
+Trained models are published on the
+[latest release](https://github.com/tokahuke/pinn/releases/latest). If you
+just want it to work, take `value_2a_32x512.pt` for two arms and
+`value_3a_64x64x64.pt` for three arms; the other assets are archival.
+Everything else in this repo exists to train, test, and beat those two files.
 
 ## Quickstart
 
 ```sh
 poetry install
 poetry run python train.py --problem three_arm     # train (Ctrl-C saves)
-poetry run python probes.py --in data/value_3a_64:64:64.pt   # diagnostics
+poetry run python probes.py --in data/three_arm.pt   # diagnostics
 poetry run arena simulate data/study.pkl --problem three_arm \
     --rho 0.999 --horizon 500 --sigma 1 --effect 0 --effect-std 0.3 --size 1000
 poetry run arena analyze data/study.pkl
 ```
+
+To use a trained two-arm model in your own code, load it from disk, tell it
+your economics, and ask for the split:
+
+```python
+import torch
+from pinn.problems.two_arm import DimensionlessValueFunction, ValueFunction
+
+# Your experiment's economics: sigma is the noise scale of one observation,
+# rho the discount rate per observation (how impatient you are).
+value = ValueFunction(
+    DimensionlessValueFunction.load("data/value_2a_32x512.pt"),
+    rho=0.001,
+    sigma=50.0,
+)
+
+# Current posterior: treatment leads by mu = 1.0 with precision tau = 0.1
+# (standard deviation ~3.2). The policy returns the share of traffic to
+# send to treatment right now.
+value.policy(torch.tensor([1.0]), torch.tensor([0.1]))   # 0.69: lean in, keep testing
+value.policy(torch.tensor([3.0]), torch.tensor([0.25]))  # 1.00: commit, stop testing
+```
+
+An answer of exactly 1.0 or 0.0 is the model saying the test is over: further
+evidence is no longer worth its discounted cost. Three arms work the same way
+through `pinn.problems.three_arm` with the pair of challenger means and the
+2x2 precision matrix.
+
+## License
+
+Copyright 2026 Pedro Arruda.
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not
+use the contents of this repository except in compliance with the License.
+You may obtain a copy of the License at
+http://www.apache.org/licenses/LICENSE-2.0 (also included in
+[LICENSE](LICENSE)).
+
+Unless required by applicable law or agreed to in writing, the software and
+the trained model checkpoints published as release assets are distributed on
+an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either
+express or implied, including without limitation any warranty of
+merchantability, fitness for a particular purpose, or non-infringement. In
+no event shall the authors or copyright holders be liable for any claim,
+damages, or other liability arising from the use of this software or the
+published model checkpoints, including decisions made or actions taken by
+systems that incorporate them. See the License for the specific language
+governing permissions and limitations.
+
+The models implement statistical decision-making under uncertainty; their
+outputs are not guaranteed to be correct, optimal, or fit for any particular
+application. Users are solely responsible for validating suitability before
+deployment.

@@ -19,6 +19,10 @@ from PIL import Image
 
 
 from pinn.problems.three_arm import DimensionlessValueFunction, ValueFunction
+from pinn.problems.two_arm import (
+    DimensionlessValueFunction as TwoArmDimensionless,
+    ValueFunction as TwoArmValue,
+)
 
 ANCHORS = np.array(
     [
@@ -180,5 +184,123 @@ def main() -> None:
     print("saved docs/hero.png")
 
 
+def _draw_trail(ax, trail: list[tuple[float, float]]) -> np.ndarray:
+    """
+    The shared trail treatment: decimate, smooth, taper. Returns the final
+    point so the caller can place the decision dot.
+    """
+    points = np.array(trail)[::10]
+    points = np.vstack([points, trail[-1]])
+
+    if len(points) > 4:
+        kernel = np.ones(3) / 3.0
+        for column in range(2):
+            interior = np.convolve(points[:, column], kernel, "same")
+            points[1:-1, column] = interior[1:-1]
+
+    segments = np.stack([points[:-1], points[1:]], axis=1)
+    widths = np.linspace(0.35, 2.6, len(segments))
+    ax.add_collection(
+        LineCollection(segments, colors="white", linewidths=widths, capstyle="round")
+    )
+
+    return points[-1]
+
+
+def two_arm_hero() -> None:
+    """
+    The funnel of doubt: x is accumulated precision (time flows right), y is
+    the belief about the treatment effect, the field is the policy (blue =
+    all-in control, orange = all-in treatment), and each test rides the
+    funnel until a wall commits it.
+    """
+    value = TwoArmValue(
+        TwoArmDimensionless.load("data/value_2a_32:512.pt"), rho=1.0, sigma=1.0
+    )
+
+    torch.manual_seed(5)
+    m = torch.zeros(PATHS)
+    tau = torch.full((PATHS,), TAU0)
+    active = torch.ones(PATHS, dtype=torch.bool)
+    chosen = torch.full((PATHS,), -1, dtype=torch.long)
+    trails: list[list[tuple[float, float]]] = [[] for _ in range(PATHS)]
+    t = 0.0
+
+    while t < HORIZON and bool(active.any()):
+        for i in range(PATHS):
+            if bool(active[i]):
+                trails[i].append((float(tau[i]), float(m[i])))
+
+        share = value.policy(m, tau)
+        up = active & (share >= 1.0)
+        down = active & (share <= 0.0)
+        chosen[up] = 1
+        chosen[down] = 0
+        active = active & ~(up | down)
+
+        rate = share * (1.0 - share)
+        m = m + active * (rate.sqrt() / tau) * DT**0.5 * torch.randn(PATHS)
+        tau = tau + active * rate * DT
+        t += DT
+
+    tau_max = 1.05 * max(trail[-1][0] for trail in trails if trail)
+    mu_max = 1.10 * max(abs(point[1]) for trail in trails for point in trail)
+
+    # Breathing room left of the birth point; floored above the decade where
+    # the field is untrained.
+    tau_left = max(0.1, TAU0 - 0.04 * (tau_max - TAU0))
+
+    columns, rows = 760, 380
+    tau_axis = torch.linspace(tau_left, tau_max, columns)
+    mu_axis = torch.linspace(-mu_max, mu_max, rows)
+    mu_grid, tau_grid = torch.meshgrid(mu_axis, tau_axis, indexing="ij")
+    share_grid = value.policy(mu_grid.flatten(), tau_grid.flatten()).reshape(
+        rows, columns
+    )
+    image = (
+        share_grid.numpy()[..., None] * ANCHORS[1]
+        + (1.0 - share_grid.numpy())[..., None] * ANCHORS[0]
+    )
+
+    fig, ax = plt.subplots(figsize=(16, 8))
+    ax.imshow(
+        np.clip(image, 0, 1) ** 0.92,
+        origin="lower",
+        extent=[tau_left, tau_max, -mu_max, mu_max],
+        interpolation="bilinear",
+        aspect="auto",
+    )
+
+    for trail, arm in zip(trails, chosen):
+        if len(trail) < 3:
+            continue
+        end = _draw_trail(ax, trail)
+
+        if arm >= 0:
+            ax.plot(
+                end[0],
+                end[1],
+                marker="o",
+                markersize=13,
+                color=DOT_COLORS[int(arm)],
+                markeredgecolor="white",
+                markeredgewidth=1.1,
+                zorder=5,
+            )
+
+    ax.set_xlim(tau_left, tau_max)
+    ax.set_ylim(-mu_max, mu_max)
+    ax.axis("off")
+    fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
+
+    buffer = io.BytesIO()
+    fig.savefig(buffer, format="png", dpi=600, transparent=True)
+    plt.close(fig)
+    buffer.seek(0)
+    Image.open(buffer).resize((2400, 1200), Image.LANCZOS).save("docs/hero2.png")
+    print("saved docs/hero2.png")
+
+
 if __name__ == "__main__":
     main()
+    two_arm_hero()

@@ -1,10 +1,12 @@
 """
-Models for the three-arm problem: the premium net and the value wrapper that
-carries the commit envelope's kinks.
+Models for the three-arm drift problem: three_arm's, with the drift each state
+is drawn for as one more input. Read three_arm/model.py first; this only
+records what changes.
 """
 
 from __future__ import annotations
 
+import math
 import torch
 import torch.nn as nn
 
@@ -13,12 +15,23 @@ from torch import Tensor
 from typing import Self
 
 from ...net import GainedTanh, hidden_widths, parse_topology
-from ...utils import nu2
+from ..three_arm.simplex import Maximum, maximize_quadratic
+from .envelope import envelope as premium_cap
 from .sample import Sample
-from .simplex import Maximum, maximize_quadratic
 
-# Width of the feature stack in ExplorationPremium.forward.
-FEATURE_COUNT = 15
+# three_arm's fourteen, plus the drift coordinate.
+FEATURE_COUNT = 16
+
+SQRT3 = math.sqrt(3.0)
+
+
+def _kinks(state: dict) -> int:
+    """
+    A checkpoint's kink count, 0 if it has no branch.
+    """
+    weight = state.get("premium.kink_in.weight")
+
+    return 0 if weight is None else weight.shape[0]
 
 
 class ExplorationPremium(nn.Module):
@@ -103,36 +116,70 @@ class ExplorationPremium(nn.Module):
 
         draw = Sample.draw(4096).fold()
         self.feature_scale = (
-            self._features(draw.m_b, draw.m_c, draw.tau_bb, draw.tau_bc, draw.tau_cc)[0]
+            self._features(
+                draw.m_b, draw.m_c, draw.tau_bb, draw.tau_bc, draw.tau_cc, draw.etahat
+            )
             .std(dim=0)
             .clamp_min(1e-3)
         )
 
-    def _load_from_state_dict(self, state_dict: dict, prefix: str, *rest) -> None:
-        # Pre-calibration checkpoints trained with no feature scaling, which
-        # is exactly a scale of ones.
-        state_dict.setdefault(prefix + "feature_scale", torch.ones(FEATURE_COUNT))
+    def stitch(self, source: dict) -> None:
+        """
+        Adopt another premium's parameters: a three_arm checkpoint (one feature
+        narrower), or a drift one whose kink branch does not match this net's.
 
-        # Stitching: checkpoints from before the kink branch load with the
-        # branch at its zero-output init, functionally identical.
-        if self.kinks > 0:
-            for name in (
-                "kink_in.weight",
-                "kink_in.bias",
-                "kink_out.weight",
-                "kink_out.bias",
-            ):
-                module, _, attribute = name.partition(".")
-                tensor = getattr(getattr(self, module), attribute)
-                state_dict.setdefault(prefix + name, tensor.detach().clone())
-        super()._load_from_state_dict(state_dict, prefix, *rest)
+        Explicit, where three_arm does this implicitly in _load_from_state_dict.
+        It has to be: padding the first layer with a zero column for the drift
+        feature is a shape change, and a setdefault cannot express one. At
+        etahat = 0 that feature is exactly 0 and the envelope collapses onto
+        three_arm's, so the stitched net IS the source, bitwise.
+
+        Kinks go both ways. A source without a branch keeps this net's
+        zero-init one, so the graft is a no-op at step 0; a source WITH one
+        being loaded into a net without is dropped, which is the smooth-first
+        path. Anything else missing is a real mismatch and should fail loudly.
+        """
+        state = dict(source)
+
+        # Both layers that read the feature stack get the pad, not just the
+        # trunk: the kink branch reads it too, and forgetting it is a shape
+        # error the moment anyone grafts a kinked checkpoint.
+        for name in ("net.0.weight", "kink_in.weight"):
+            weight = state.get(name)
+
+            if weight is not None and weight.shape[1] == FEATURE_COUNT - 1:
+                state[name] = torch.cat(
+                    [weight, torch.zeros_like(weight[:, :1])], dim=1
+                )
+
+        if state["feature_scale"].shape[0] == FEATURE_COUNT - 1:
+            state["feature_scale"] = torch.cat(
+                [state["feature_scale"], self.feature_scale[-1:]]
+            )
+
+        for name, tensor in self.state_dict().items():
+            if name.startswith("kink_"):
+                state.setdefault(name, tensor)
+
+        for name in list(state):
+            if name.startswith("kink_") and self.kinks == 0:
+                del state[name]
+        self.load_state_dict(state)
 
     def _features(
-        self, m_b: Tensor, m_c: Tensor, tau_bb: Tensor, tau_bc: Tensor, tau_cc: Tensor
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        self,
+        m_b: Tensor,
+        m_c: Tensor,
+        tau_bb: Tensor,
+        tau_bc: Tensor,
+        tau_cc: Tensor,
+        etahat: Tensor,
+    ) -> Tensor:
         """
-        The raw (uncalibrated) feature stack, plus the marginal precisions and
-        correlation the envelope reuses.
+        The raw (uncalibrated) feature stack. three_arm returns the marginal
+        precisions alongside for its envelope to reuse; the drift envelope
+        recomputes them from the state instead, which is what keeps the
+        etahat = 0 anchor bitwise, so they are not returned here.
         """
         # Marginal precision per contrast, via Schur complements of T. NOT the
         # raw diagonals: tau_bb is the precision GIVEN the other contrast --
@@ -175,19 +222,33 @@ class ExplorationPremium(nn.Module):
                 # two contrasts' beliefs, in [0, 1) on reachable states;
                 # r = 0 is the decoupled two_arm limit.
                 correlation,
+                # The drift coordinate, LAST because the graft pads on the
+                # right. It is the state's share of the ceiling drift imposes,
+                # which is exactly the erosion term's own coefficient
+                # (docs/three_arm_drift.md sections 6 and 8): bounded on the
+                # reachable set, unchanged by shuffling arm labels since det T
+                # is the invariant, and exactly 0 at etahat = 0 -- which is
+                # what makes the three_arm graft bitwise rather than close.
+                torch.log1p(2.0 * SQRT3 * etahat**2 * det),
             ],
             dim=-1,
         )
 
-        return features, precision_b, precision_c, correlation
+        return features
 
     def forward(
-        self, m_b: Tensor, m_c: Tensor, tau_bb: Tensor, tau_bc: Tensor, tau_cc: Tensor
+        self,
+        m_b: Tensor,
+        m_c: Tensor,
+        tau_bb: Tensor,
+        tau_bc: Tensor,
+        tau_cc: Tensor,
+        etahat: Tensor,
     ) -> Tensor:
-        features, precision_b, precision_c, correlation = self._features(
-            m_b, m_c, tau_bb, tau_bc, tau_cc
+        scaled = (
+            self._features(m_b, m_c, tau_bb, tau_bc, tau_cc, etahat)
+            / self.feature_scale
         )
-        scaled = features / self.feature_scale
         response = self.net(scaled).squeeze(-1)
 
         if self.kinks > 0:
@@ -202,8 +263,8 @@ class ExplorationPremium(nn.Module):
         # to 1.87x loose there and bred a never-explore attractor). No
         # correlation clamp: k < 1 strictly on reachable states, and a clamp
         # would kink d(envelope)/d(tau_bc) exactly where the corner needs it.
-        envelope = self.log_scale.exp() * nu2(
-            m_b, m_c, precision_b.rsqrt(), precision_c.rsqrt(), correlation
+        envelope = self.log_scale.exp() * premium_cap(
+            m_b, m_c, tau_bb, tau_bc, tau_cc, etahat
         )
 
         # y/(1+y) with y = relu(r)**2 maps the response into [0, 1): both
@@ -241,32 +302,38 @@ class DimensionlessValueFunction(nn.Module):
         self.premium = premium
 
     @classmethod
-    def load(cls, path: Path, kinks: int = 0) -> Self:
+    def load(cls, path: Path) -> Self:
         """
         A trained checkpoint as a model, architecture inferred from the state
-        dict (hidden widths from the premium net's weight shapes; a stored
-        kink branch keeps its width). `kinks` only sizes a first-time stitch
-        onto a checkpoint that has none.
+        dict.
         """
         state = torch.load(path)
-        hidden = hidden_widths(state)
-
-        if "premium.kink_in.weight" in state:
-            kinks = state["premium.kink_in.weight"].shape[0]
-        value = cls(ExplorationPremium(hidden, kinks=kinks))
+        value = cls(ExplorationPremium(hidden_widths(state), kinks=_kinks(state)))
         value.load_state_dict(state)
 
         return value
 
     def forward(
-        self, m_b: Tensor, m_c: Tensor, tau_bb: Tensor, tau_bc: Tensor, tau_cc: Tensor
+        self,
+        m_b: Tensor,
+        m_c: Tensor,
+        tau_bb: Tensor,
+        tau_bc: Tensor,
+        tau_cc: Tensor,
+        etahat: Tensor,
     ) -> Tensor:
         commit = torch.relu(torch.maximum(m_b, m_c))
 
-        return commit + self.premium(m_b, m_c, tau_bb, tau_bc, tau_cc)
+        return commit + self.premium(m_b, m_c, tau_bb, tau_bc, tau_cc, etahat)
 
     def hamiltonian(
-        self, m_b: Tensor, m_c: Tensor, tau_bb: Tensor, tau_bc: Tensor, tau_cc: Tensor
+        self,
+        m_b: Tensor,
+        m_c: Tensor,
+        tau_bb: Tensor,
+        tau_bc: Tensor,
+        tau_cc: Tensor,
+        etahat: Tensor,
     ) -> tuple[Tensor, Maximum]:
         """
         The HJB's two sides on wedge states: the value v and the maximized
@@ -276,8 +343,14 @@ class DimensionlessValueFunction(nn.Module):
         H(b, c) = b (m_b + l_ab) + c (m_c + l_ac) - l_ab b^2 - l_ac c^2
         + (l_bc - l_ab - l_ac) b c, handed to plain calculus in
         triangle-quadratic coefficients. Everything is graph-connected to the
-        premium's parameters, so pde_loss grades v - best.value and policy
-        reads the argmax off the same derivation.
+        premium's parameters, so pde_loss grades the gap and policy reads the
+        argmax off the same derivation.
+
+        Drift adds one thing, on the LEFT: what the wandering erodes from the
+        precision each instant, T E T, contracted with the value's precision
+        derivatives. It does not depend on the allocation, so the maximization
+        below is byte-identical to three_arm's and the simplex code is that
+        module's, imported unchanged (doc section 2).
         """
         m_b = m_b.detach().requires_grad_(True)
         m_c = m_c.detach().requires_grad_(True)
@@ -285,7 +358,7 @@ class DimensionlessValueFunction(nn.Module):
         tau_bc = tau_bc.detach().requires_grad_(True)
         tau_cc = tau_cc.detach().requires_grad_(True)
 
-        v = self(m_b, m_c, tau_bb, tau_bc, tau_cc)
+        v = self(m_b, m_c, tau_bb, tau_bc, tau_cc, etahat)
         v_mb, v_mc, v_tbb, v_tbc, v_tcc = torch.autograd.grad(
             v.sum(),
             [m_b, m_c, tau_bb, tau_bc, tau_cc],
@@ -319,19 +392,38 @@ class DimensionlessValueFunction(nn.Module):
             v_tbb + v_tcc - v_tbc
         )
 
-        return v, maximize_quadratic(
+        # The erosion, T E T = etahat^2 (T^2 + v v^T) with v = T 1, whose two
+        # entries are the a-b and a-c pair coordinates. Coefficient one on each
+        # of the three independent entries, matching the chain-rule convention
+        # the learning numbers above already use.
+        pair_ab = tau_bb + tau_bc
+        pair_ac = tau_cc + tau_bc
+        erosion = etahat**2
+        erosion_bb = erosion * (tau_bb**2 + tau_bc**2 + pair_ab**2)
+        erosion_bc = erosion * (tau_bc * (tau_bb + tau_cc) + pair_ab * pair_ac)
+        erosion_cc = erosion * (tau_bc**2 + tau_cc**2 + pair_ac**2)
+
+        left = v + erosion_bb * v_tbb + erosion_bc * v_tbc + erosion_cc * v_tcc
+
+        return left, maximize_quadratic(
             -l_ab, -l_ac, l_bc - l_ab - l_ac, m_b + l_ab, m_c + l_ac
         )
 
     def policy(
-        self, m_b: Tensor, m_c: Tensor, tau_bb: Tensor, tau_bc: Tensor, tau_cc: Tensor
+        self,
+        m_b: Tensor,
+        m_c: Tensor,
+        tau_bb: Tensor,
+        tau_bc: Tensor,
+        tau_cc: Tensor,
+        etahat: Tensor,
     ) -> Tensor:
         """
         The argmax allocation in wedge roles, shape (n, 3) rows
         (alpha_a, alpha_b, alpha_c). Wedge states only, like forward;
         ValueFunction.policy handles fold and physical arm labels.
         """
-        _, best = self.hamiltonian(m_b, m_c, tau_bb, tau_bc, tau_cc)
+        _, best = self.hamiltonian(m_b, m_c, tau_bb, tau_bc, tau_cc, etahat)
 
         return torch.stack([1.0 - best.x - best.y, best.x, best.y], dim=-1).detach()
 
@@ -342,7 +434,8 @@ class ValueFunction(nn.Module):
 
     Wraps a trained DimensionlessValueFunction with the doc section 11
     readout dictionary -- mhat = m / (sigma sqrt(rho)), tauhat = rho sigma^2
-    tau, V = (sigma / sqrt(rho)) vhat -- and folds arbitrary states into the
+    tau, etahat = eta / (rho sigma), V = (sigma / sqrt(rho)) vhat -- and folds
+    arbitrary states into the
     fundamental wedge for the premium (S3-invariant, doc section 6), keeping
     the commit term in physical labels. States must still be reachable
     (tau_bc <= 0, pair coordinates nonnegative); rho = sigma = 1 on wedge
@@ -350,13 +443,18 @@ class ValueFunction(nn.Module):
     """
 
     def __init__(
-        self, dimensionless: DimensionlessValueFunction, rho: float, sigma: float
+        self,
+        dimensionless: DimensionlessValueFunction,
+        rho: float,
+        sigma: float,
+        eta: float,
     ) -> None:
         super().__init__()
 
         self.dimensionless = dimensionless
         self.rho = rho
         self.sigma = sigma
+        self.eta = eta
 
     def _fold(
         self, m_b: Tensor, m_c: Tensor, tau_bb: Tensor, tau_bc: Tensor, tau_cc: Tensor
@@ -374,6 +472,7 @@ class ValueFunction(nn.Module):
             precision_scale * tau_bb,
             precision_scale * tau_bc,
             precision_scale * tau_cc,
+            torch.full_like(m_b, self.eta / (self.rho * self.sigma)),
         ).fold_ordered()
 
     def forward(
@@ -381,7 +480,12 @@ class ValueFunction(nn.Module):
     ) -> Tensor:
         folded, _ = self._fold(m_b, m_c, tau_bb, tau_bc, tau_cc)
         premium = self.dimensionless.premium(
-            folded.m_b, folded.m_c, folded.tau_bb, folded.tau_bc, folded.tau_cc
+            folded.m_b,
+            folded.m_c,
+            folded.tau_bb,
+            folded.tau_bc,
+            folded.tau_cc,
+            folded.etahat,
         )
         commit = torch.relu(torch.maximum(m_b, m_c)) / (self.sigma * self.rho**0.5)
 
@@ -398,7 +502,12 @@ class ValueFunction(nn.Module):
         """
         folded, order = self._fold(m_b, m_c, tau_bb, tau_bc, tau_cc)
         roles = self.dimensionless.policy(
-            folded.m_b, folded.m_c, folded.tau_bb, folded.tau_bc, folded.tau_cc
+            folded.m_b,
+            folded.m_c,
+            folded.tau_bb,
+            folded.tau_bc,
+            folded.tau_cc,
+            folded.etahat,
         )
 
         return torch.zeros_like(roles).scatter_(1, order, roles)
@@ -409,33 +518,48 @@ def init_model(
 ) -> DimensionlessValueFunction:
     """
     A model to start training from: fresh at `topology`, or adapted from an
-    existing checkpoint's `state`. Exactly one of the two.
+    existing checkpoint's `state`, or both -- which means adapt the source into
+    the target shape.
 
     The CLI reads the file; this takes the state dict. A problem module has no
     business knowing where checkpoints live, and passing the dict keeps
     `pinn init --from` the only place that decides what a source file means.
     """
-    if (state is None) == (topology is None):
-        raise ValueError("pass exactly one of state, topology")
+    if state is None and topology is None:
+        raise ValueError("pass at least one of state, topology")
 
     if topology is not None:
         hidden, kinks = parse_topology(topology)
+        value = DimensionlessValueFunction(ExplorationPremium(hidden, kinks=kinks))
 
-        return DimensionlessValueFunction(ExplorationPremium(hidden, kinks=kinks))
+        # Both: topology is the TARGET shape, state the source to adapt into
+        # it. That is how a three_arm checkpoint becomes a drift one, and how
+        # its kink branch is kept or dropped.
+        if state is not None:
+            value.premium.stitch(
+                {k.removeprefix("premium."): v for k, v in state.items()}
+            )
 
-    hidden = hidden_widths(state)
-    kinks = (
-        state["premium.kink_in.weight"].shape[0]
-        if "premium.kink_in.weight" in state
-        else 0
+        return value
+
+    value = DimensionlessValueFunction(
+        ExplorationPremium(hidden_widths(state), kinks=_kinks(state))
     )
-    value = DimensionlessValueFunction(ExplorationPremium(hidden, kinks=kinks))
+    features = state["premium.net.0.weight"].shape[1]
+
+    # A three_arm checkpoint is one feature narrower: stitch it as the
+    # etahat = 0 slice.
+    if features == FEATURE_COUNT - 1:
+        value.premium.stitch({k.removeprefix("premium."): v for k, v in state.items()})
+
+        return value
     value.load_state_dict(state)
 
     return value
 
 
 if __name__ == "__main__":
+    from ..three_arm.model import ExplorationPremium as ThreeArm
 
     class _ZeroPremium(nn.Module):
         def forward(self, m_b: Tensor, *rest: Tensor) -> Tensor:
@@ -443,53 +567,69 @@ if __name__ == "__main__":
 
     m_b, m_c = torch.randn(100), torch.randn(100)
     taus = (torch.rand(100) + 0.5, -torch.rand(100) * 0.3, torch.rand(100) + 0.5)
-    v = DimensionlessValueFunction(_ZeroPremium())(m_b, m_c, *taus)
+    drift = torch.rand(100) * 10.0
+    v = DimensionlessValueFunction(_ZeroPremium())(m_b, m_c, *taus, drift)
 
     assert torch.allclose(v, torch.relu(torch.maximum(m_b, m_c)))
 
     # The premium runs end to end on wedge states, stays finite, and at
-    # log_scale = 0 it obeys both proven properties: 0 <= u <= envelope.
+    # log_scale = 0 it obeys both proven properties: 0 <= u <= the cap.
     premium = ExplorationPremium([32, 16])
     draw = Sample.draw(1000).fold()
-    state = (draw.m_b, draw.m_c, draw.tau_bb, draw.tau_bc, draw.tau_cc)
+    state = (draw.m_b, draw.m_c, draw.tau_bb, draw.tau_bc, draw.tau_cc, draw.etahat)
     u = premium(*state)
 
     assert premium.net[0].in_features == FEATURE_COUNT
     assert u.shape == draw.m_b.shape and u.isfinite().all()
+    assert (u >= 0).all() and (u <= premium_cap(*state) + 1e-6).all()
 
-    precision_b = draw.tau_bb - draw.tau_bc**2 / draw.tau_cc
-    precision_c = draw.tau_cc - draw.tau_bc**2 / draw.tau_bb
-    correlation = -draw.tau_bc / (draw.tau_bb * draw.tau_cc).sqrt()
-    bound = nu2(
-        draw.m_b, draw.m_c, precision_b.rsqrt(), precision_c.rsqrt(), correlation
-    )
-
-    assert (u >= 0).all() and (u <= bound + 1e-6).all()
-
-    # Stitch identity: an old-format state (no kink keys) loaded into a
-    # kinked net is the same function -- the zero-init output layer keeps the
-    # branch silent -- and the branch's parameters are trainable.
+    # Kinks both ways: a source without a branch keeps this net's zero-init
+    # one (silent at step 0), and a source with one loaded into a net without
+    # is dropped rather than refused.
     stitched = ExplorationPremium([32, 16], kinks=8)
-    stitched.load_state_dict(premium.state_dict())
+    stitched.stitch(premium.state_dict())
 
     assert torch.allclose(stitched(*state), u)
     assert stitched.kink_out.weight.requires_grad
 
-    # The deployment wrapper: at rho = sigma = 1 on wedge states it equals
-    # the dimensionless form; it is b<->c relabel invariant on any state; and
-    # units scale exactly by the section 11 dictionary.
-    dimensionless = DimensionlessValueFunction(premium)
-    wrapper = ValueFunction(dimensionless, rho=1.0, sigma=1.0)
+    smooth = ExplorationPremium([32, 16])
+    smooth.stitch(stitched.state_dict())
 
-    assert torch.allclose(wrapper(*state), dimensionless(*state), atol=1e-6)
+    assert smooth.kinks == 0 and torch.allclose(smooth(*state), u)
+
+    # THE graft: a three_arm checkpoint is one feature narrower, and at
+    # etahat = 0 the extra feature is exactly 0 and the cap collapses onto
+    # three_arm's, so the stitched net IS the source. Bitwise, not close --
+    # this is the check that says the whole feature/cap/stitch chain is right.
+    three_arm = ThreeArm([32, 16])
+    grafted = ExplorationPremium([32, 16])
+    grafted.stitch(three_arm.state_dict())
+    zero = torch.zeros_like(draw.m_b)
+
+    assert torch.equal(
+        grafted(draw.m_b, draw.m_c, draw.tau_bb, draw.tau_bc, draw.tau_cc, zero),
+        three_arm(draw.m_b, draw.m_c, draw.tau_bb, draw.tau_bc, draw.tau_cc),
+    )
+    assert torch.equal(grafted.feature_scale[:-1], three_arm.feature_scale)
+
+    # The deployment wrapper: at rho = sigma = 1, eta = 0 on wedge states it
+    # equals the dimensionless form; it is b<->c relabel invariant on any
+    # state; and units scale exactly by the section 11 dictionary.
+    dimensionless = DimensionlessValueFunction(premium)
+    wrapper = ValueFunction(dimensionless, rho=1.0, sigma=1.0, eta=0.0)
+    flat = (draw.m_b, draw.m_c, draw.tau_bb, draw.tau_bc, draw.tau_cc, zero)
+
+    assert torch.allclose(wrapper(*state[:-1]), dimensionless(*flat), atol=1e-6)
 
     anywhere = (m_b, m_c, *taus)
     swapped = (m_c, m_b, taus[2], taus[1], taus[0])
+    drifting = ValueFunction(dimensionless, rho=1.0, sigma=1.0, eta=3.0)
 
-    assert torch.allclose(wrapper(*anywhere), wrapper(*swapped), atol=1e-5)
+    assert torch.allclose(drifting(*anywhere), drifting(*swapped), atol=1e-5)
 
-    rho, sigma = 0.04, 2.5
-    real = ValueFunction(dimensionless, rho=rho, sigma=sigma)
+    rho, sigma, eta = 0.04, 2.5, 0.3
+    real = ValueFunction(dimensionless, rho=rho, sigma=sigma, eta=eta)
+    unit = ValueFunction(dimensionless, rho=1.0, sigma=1.0, eta=eta / (rho * sigma))
     mean_scale, precision_scale = sigma * rho**0.5, rho * sigma**2
     dimensional = (
         state[0] * mean_scale,
@@ -501,18 +641,18 @@ if __name__ == "__main__":
 
     assert torch.allclose(
         real(*dimensional),
-        (sigma / rho**0.5) * dimensionless(*state),
+        (sigma / rho**0.5) * unit(*state[:-1]),
         rtol=1e-5,
     )
 
     # The policy: valid simplex rows on any state, and the b<->c relabel
     # permutes the allocation columns with it.
-    alpha = wrapper.policy(*anywhere)
+    alpha = drifting.policy(*anywhere)
 
     assert (alpha >= -1e-6).all() and (alpha <= 1 + 1e-6).all()
     assert torch.allclose(alpha.sum(dim=-1), torch.ones(len(m_b)), atol=1e-5)
 
-    swapped_alpha = wrapper.policy(*swapped)
+    swapped_alpha = drifting.policy(*swapped)
 
     assert torch.allclose(alpha[:, [0, 2, 1]], swapped_alpha, atol=1e-5)
     print("ok")

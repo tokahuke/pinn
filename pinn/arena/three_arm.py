@@ -17,7 +17,7 @@ from torch import Tensor
 from typing import Self
 
 from ..problems.three_arm import DimensionlessValueFunction, ValueFunction
-from ..utils import _bivariate_ndtr
+from ..utils.gaussian import _bivariate_ndtr
 from .harness import Params, Policy, Runner, optimal_deadline
 
 CHECKPOINT = Path("data") / "value_3a_64:64:64.pt"
@@ -62,6 +62,14 @@ def _rates(allocation: Tensor, sigma: float) -> tuple[float, float, float]:
     )
 
 
+def advance(runner: Runner, deltas: Tensor) -> Tensor:
+    """
+    The truth between epochs. Static here by definition of the problem; drift
+    lives in two_arm_drift, so --eta has no effect on this zoo.
+    """
+    return deltas
+
+
 def observe(
     runner: Runner, allocation: Tensor, deltas: Tensor
 ) -> tuple[Tensor, float, float, float]:
@@ -72,6 +80,12 @@ def observe(
     (an edge allocation is rank one, a vertex rank zero).
     """
     g_bb, g_bc, g_cc = _rates(allocation, runner.params.sigma)
+
+    # A vertex buys nothing. Return early rather than drawing two variates and
+    # multiplying them away: the runner no longer stops at a vertex, so those
+    # draws would shift the shared rng stream the seed pairing relies on.
+    if g_bb == 0.0 and g_cc == 0.0:
+        return torch.zeros(2), 0.0, 0.0, 0.0
 
     # Closed-form 2x2 Cholesky of G, guarded for the rank-deficient edges.
     root_bb = g_bb**0.5
@@ -336,7 +350,7 @@ def demo() -> None:
     # Soft commit time reduces to the deadline: thirds is the uniform
     # allocation (share 1, up to float32 thirds), and the committing epoch
     # buys nothing.
-    assert abs(etc.precision_time - (etc.epochs - 1)) < 1e-3, etc.precision_time
+    assert abs(etc.precision_time - etc.committed_at) < 1e-3, etc.precision_time
 
     elimination = runner.run(problem, Elimination.init(runner.params), b_wins)
     assert elimination.committed == 1, elimination.committed
@@ -349,11 +363,11 @@ def demo() -> None:
     assert pinn.committed == 1, (pinn.committed, pinn.final_allocation)
 
     print(f"matching regret {matching.regret:.2f}, final {matching.final_allocation}")
-    print(f"etc regret {etc.regret:.2f}, committed at epoch {etc.epochs}")
+    print(f"etc regret {etc.regret:.2f}, committed at epoch {etc.committed_at}")
     print(
-        f"elimination regret {elimination.regret:.2f}, committed at epoch {elimination.epochs}"
+        f"elimination regret {elimination.regret:.2f}, committed at epoch {elimination.committed_at}"
     )
-    print(f"pinn regret {pinn.regret:.2f}, committed at epoch {pinn.epochs}")
+    print(f"pinn regret {pinn.regret:.2f}, committed at epoch {pinn.committed_at}")
 
 
 if __name__ == "__main__":

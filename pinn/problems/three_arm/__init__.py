@@ -11,5 +11,10 @@ free-information envelope (doc section 13), simplex max, and the full loss
 """
 
 from .loss import control_tie_loss, loss, objective, pde_loss, treatment_tie_loss
-from .model import DimensionlessValueFunction, ExplorationPremium, ValueFunction
+from .model import (
+    DimensionlessValueFunction,
+    init_model,
+    ExplorationPremium,
+    ValueFunction,
+)
 from .sample import RidgeSample, Sample

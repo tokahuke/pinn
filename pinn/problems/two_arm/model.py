@@ -12,7 +12,7 @@ from pathlib import Path
 from torch import Tensor
 from typing import Self
 
-from ...net import GainedTanh
+from ...net import GainedTanh, hidden_widths, parse_topology
 from ...utils import nu
 from .sample import sample_sobol
 from .simplex import Maximum, maximize_quadratic
@@ -149,11 +149,7 @@ class DimensionlessValueFunction(nn.Module):
         dict (hidden widths from the premium net's weight shapes).
         """
         state = torch.load(path)
-        hidden = [
-            w.shape[0]
-            for k, w in state.items()
-            if k.startswith("premium.net.") and k.endswith(".weight")
-        ][:-1]
+        hidden = hidden_widths(state)
         value = cls(ExplorationPremium(hidden))
         value.load_state_dict(state)
 
@@ -166,11 +162,11 @@ class DimensionlessValueFunction(nn.Module):
         """
         The HJB's two sides on the similarity chart (z, s), where the operator
 
-            M[g] = g_s + (1/2) g_zz + (z/2) g_z - (1/2) g
+            L_ab[g] = g_s + (1/2) g_zz + (z/2) g_z - (1/2) g
 
         is O(1)-conditioned at every information level (docs/two_arm.md
         section 8): the equation reads e^s (z + g) = max over alpha of
-        alpha e^s z + alpha(1-alpha) M[g]. Returns the left side and the
+        alpha e^s z + alpha(1-alpha) L_ab[g]. Returns the left side and the
         maximization, both graph-connected to the premium's parameters, so
         pde_loss grades their gap and policy reads the argmax off the same
         derivation. muhat >= 0 only, like forward.
@@ -182,8 +178,8 @@ class DimensionlessValueFunction(nn.Module):
         g_z, g_s = torch.autograd.grad(g.sum(), [z, s], create_graph=True)
         (g_zz,) = torch.autograd.grad(g_z.sum(), z, create_graph=True)
 
-        m_of_g = g_s + 0.5 * g_zz + 0.5 * z * g_z - 0.5 * g
-        best = maximize_quadratic(-m_of_g, s.exp() * z + m_of_g)
+        l_ab = g_s + 0.5 * g_zz + 0.5 * z * g_z - 0.5 * g
+        best = maximize_quadratic(-l_ab, s.exp() * z + l_ab)
 
         return s.exp() * (z + g), best
 
@@ -234,6 +230,34 @@ class ValueFunction(nn.Module):
         alpha = self.dimensionless.policy(muhat.abs(), tauhat)
 
         return torch.where(muhat >= 0, alpha, 1.0 - alpha)
+
+
+def init_model(
+    state: dict | None = None, topology: str | None = None
+) -> DimensionlessValueFunction:
+    """
+    A model to start training from: fresh at `topology`, or adapted from an
+    existing checkpoint's `state`. Exactly one of the two.
+
+    The CLI reads the file; this takes the state dict. A problem module has no
+    business knowing where checkpoints live, and passing the dict keeps
+    `pinn init --from` the only place that decides what a source file means.
+    """
+    if (state is None) == (topology is None):
+        raise ValueError("pass exactly one of state, topology")
+
+    if topology is not None:
+        hidden, kinks = parse_topology(topology)
+
+        if kinks > 0:
+            raise ValueError(f"{__package__.rsplit('.', 1)[-1]} has no kink branch")
+
+        return DimensionlessValueFunction(ExplorationPremium(hidden))
+
+    value = DimensionlessValueFunction(ExplorationPremium(hidden_widths(state)))
+    value.load_state_dict(state)
+
+    return value
 
 
 if __name__ == "__main__":

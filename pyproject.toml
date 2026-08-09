@@ -16,6 +16,7 @@ dependencies = [
 
 [project.scripts]
 arena = "pinn.arena.main:cli"
+pinn = "pinn.cli:cli"
 
 
 [build-system]

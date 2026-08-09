@@ -10,6 +10,8 @@ import torch
 from torch import Tensor
 from torch.quasirandom import SobolEngine
 
+from ...utils import decade_scale, exponential
+
 # The floor keeps tauhat away from the singular corner: numerical stability
 # ONLY, no prior baked in -- the net trains general down to priors ~30 sd
 # wide. No real experiment starts more agnostic than that, and each decade
@@ -28,9 +30,9 @@ def _tauhat(u_scale: Tensor, u_tail: Tensor) -> Tensor:
     The tauhat law: floor + decade-spread scale times an Exp(mean 2) tail,
     densest around 1 and reaching the floor with real per-decade mass.
     """
-    scale = torch.pow(10.0, -SCALE_DECADES * u_scale**2)
+    scale = decade_scale(u_scale, SCALE_DECADES)
 
-    return PRIOR_FLOOR - 2.0 * scale * (1.0 - u_tail).log()
+    return PRIOR_FLOOR + 2.0 * scale * exponential(u_tail)
 
 
 def sample_sobol(n: int) -> tuple[Tensor, Tensor]:
@@ -43,7 +45,7 @@ def sample_sobol(n: int) -> tuple[Tensor, Tensor]:
     """
     t = _SOBOL.draw(n).clamp(1e-7, 1.0 - 1e-7)
     tauhat = _tauhat(t[:, 0], t[:, 1])
-    muhat = -(2.0 / tauhat.sqrt()) * (1.0 - t[:, 2]).log()
+    muhat = (2.0 / tauhat.sqrt()) * exponential(t[:, 2])
 
     return muhat, tauhat
 

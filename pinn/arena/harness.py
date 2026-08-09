@@ -26,6 +26,10 @@ class Params:
     effect: float
     effect_std: float
     size: int
+    # Drift volatility of the true effect per epoch. 0 is a static world and
+    # recovers the pre-drift arena exactly. This is the ENVIRONMENT's eta; a
+    # policy's belief about it is a policy parameter, so the two can differ.
+    eta: float = 0.0
 
 
 class Policy(ABC):
@@ -72,7 +76,11 @@ class Run:
     One simulated experiment: what was allocated and what it cost.
 
     `regret` is discounted at the runner's rho, so it is directly comparable across
-    policies only within a single runner. `committed` is the absorbed arm index.
+    policies only within a single runner. `delta` is the effect at epoch 0; under
+    drift it is the starting point, not the truth throughout. `committed` is the
+    first arm the policy put all traffic on and `committed_at` the epoch it did
+    so -- a record, not a stopping condition, since drift makes a vertex
+    escapable and the policy may leave it again.
     """
 
     delta: list[float]
@@ -82,6 +90,7 @@ class Run:
     final_allocation: list[float] = field(default_factory=list)
     regret: float = 0.0
     committed: int | None = None
+    committed_at: int | None = None
 
 
 @dataclass
@@ -140,22 +149,29 @@ class Runner:
 
     def run(self, problem, policy: Policy, deltas: Tensor) -> Run:
         """
-        Play `policy` against fixed true effects for the full horizon.
+        Play `policy` against the environment for the full horizon.
 
         Takes an already-built policy, since the caller constructs one per job via
         `Policy.init`. Reusing an instance across two runs carries state between them.
 
-        Per-epoch regret is measured against an oracle that puts everything on the
-        best arm. A vertex allocation is absorbing (it observes no contrast), so
-        the run ends there and every remaining epoch accrues at that commitment.
+        The truth advances every epoch through `problem.advance`, which is the
+        identity at eta = 0, so there is no static/drifting branch anywhere in
+        the loop. Regret is measured against an oracle that puts everything on
+        the best arm AT THAT EPOCH -- under drift the oracle switches with the
+        world.
+
+        Every epoch is simulated. The old shortcut (a vertex is absorbing, so
+        fast-forward the discounted tail) is exact only when the truth is
+        frozen; with drift a committed policy keeps accruing against a moving
+        oracle and can profitably come back.
         """
-        best = float(deltas.max())
         result = Run(delta=[float(d) for d in deltas])
 
         for epoch in range(self.horizon):
             allocation = policy.propose()
             result.epochs = epoch + 1
             result.final_allocation = [float(a) for a in allocation]
+            best = float(deltas.max())
             reward = float((allocation * deltas).sum())
             result.regret += self.rho**epoch * (best - reward)
 
@@ -170,12 +186,11 @@ class Runner:
 
             top, arm = allocation.max(dim=-1)
 
-            if float(top) >= 1.0:
+            if float(top) >= 1.0 and result.committed is None:
                 result.committed = int(arm)
-                result.regret += self.discounted_tail(epoch + 1, best - reward)
-
-                break
+                result.committed_at = epoch
 
             policy.observe(problem.observe(self, allocation, deltas))
+            deltas = problem.advance(self, deltas)
 
         return result

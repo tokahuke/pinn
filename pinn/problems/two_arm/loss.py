@@ -26,11 +26,11 @@ def pde_loss(
     section 8), maximization kept explicit. With z = muhat sqrt(tauhat),
     s = log tauhat, g = sqrt(tauhat) u, and the O(1) operator
 
-        M[g] = g_s + (1/2) g_zz + (z/2) g_z - (1/2) g
+        L_ab[g] = g_s + (1/2) g_zz + (z/2) g_z - (1/2) g
 
     the HJB v = max alpha muhat + alpha(1-alpha) Lhat[v] becomes
 
-        e^s (z + g) = max over alpha in [0, 1] of alpha e^s z + alpha(1-alpha) M[g]
+        e^s (z + g) = max over alpha in [0, 1] of alpha e^s z + alpha(1-alpha) L_ab[g]
 
     Grading in this form is what kills the raw-coordinate stiffness: the
     1/(2 tauhat^2) that multiplied curvature (9 decades of coefficient spread)
@@ -42,7 +42,7 @@ def pde_loss(
     KNOWN DEGENERATE on its own: g = 0 (the never-explore solution) zeroes
     this residual exactly. The ridge loss breaks the degeneracy.
     """
-    # The derivation (similarity chart, M[g], interval max) lives on the
+    # The derivation (similarity chart, L_ab[g], interval max) lives on the
     # model: one chain serves training and policy readout.
     lhs, best = value.hamiltonian(muhat, tauhat)
 
@@ -150,8 +150,8 @@ if __name__ == "__main__":
     g = (s / 2).exp() * value.premium(z * (-s / 2).exp(), s.exp())
     g_z, g_s = torch.autograd.grad(g.sum(), [z, s], create_graph=True)
     (g_zz,) = torch.autograd.grad(g_z.sum(), z, create_graph=True)
-    m_of_g = g_s + 0.5 * g_zz + 0.5 * z * g_z - 0.5 * g
-    best_sim = maximize_quadratic(-m_of_g, s.exp() * z + m_of_g)
+    l_ab = g_s + 0.5 * g_zz + 0.5 * z * g_z - 0.5 * g
+    best_sim = maximize_quadratic(-l_ab, s.exp() * z + l_ab)
     residual_sim = s.exp() * (z + g) - best_sim.value
 
     raw_muhat = muhat.clone().requires_grad_(True)

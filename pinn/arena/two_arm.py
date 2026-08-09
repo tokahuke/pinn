@@ -19,10 +19,10 @@ from .harness import Params, Policy, Runner, optimal_deadline
 
 # The champion checkpoint the Pinn policy plays; repo-root relative, like
 # every other script's data path.
-CHECKPOINT = Path("data") / "value_2a_32:512.pt"
+CHECKPOINT = Path("data") / "two_arm.pt"
 
 # Internal (dimensionless) detail: the weakest prior the champion currently
-# supports. Below this decade its M[g] goes negative at the ridge (the
+# supports. Below this decade its L_ab goes negative at the ridge (the
 # stiff-corner error, measured 2026-08-06), flipping the Hamiltonian convex
 # and vertex-committing on zero evidence; revisit when the low-tau anchor
 # lands. One decade above the sampler floor 1e-3.
@@ -49,12 +49,27 @@ def draw_effect(runner: Runner) -> Tensor:
     return torch.tensor([0.0, delta])
 
 
+def advance(runner: Runner, deltas: Tensor) -> Tensor:
+    """
+    The truth between epochs. Static here by definition of the problem; drift
+    lives in two_arm_drift, so --eta has no effect on this zoo.
+    """
+    return deltas
+
+
 def observe(runner: Runner, allocation: Tensor, deltas: Tensor) -> tuple[float, float]:
     """
     One epoch's evidence: a noisy estimate of the contrast at the precision
     the split bought, alpha_0 alpha_1 / sigma^2.
+
+    A vertex buys nothing, and the runner no longer stops there, so that case
+    has to be finite rather than 1/0: zero precision, and a value the
+    precision-weighted update multiplies away.
     """
     precision = float(allocation[0] * allocation[1]) / runner.params.sigma**2
+
+    if precision == 0.0:
+        return 0.0, 0.0
 
     return runner.normal(float(deltas[1]), precision**-0.5), precision
 
@@ -238,11 +253,11 @@ def demo() -> None:
     # derives the deadline from params, so the commit epoch tracks it.
     etc = runner.run(problem, ExploreThenCommit.init(runner.params), winner)
     assert etc.committed == 1, etc.committed
-    assert etc.epochs == ExploreThenCommit.init(runner.params).deadline + 1
+    assert etc.committed_at == ExploreThenCommit.init(runner.params).deadline
 
-    # Soft commit time reduces to the deadline exactly: the epoch that
-    # proposes the border buys no information, so it lands one below epochs.
-    assert abs(etc.precision_time - (etc.epochs - 1)) < 1e-6, etc.precision_time
+    # Soft commit time reduces to the commit epoch exactly: every epoch before
+    # it is a 50/50 split worth 1, every epoch after is a vertex worth 0.
+    assert abs(etc.precision_time - etc.committed_at) < 1e-6, etc.precision_time
 
     ztest = runner.run(problem, ZTest.init(runner.params), winner)
     assert ztest.committed == 1, ztest.committed
@@ -257,9 +272,9 @@ def demo() -> None:
     assert pinn.committed == 1, (pinn.committed, pinn.final_allocation)
 
     print(f"matching regret {matching.regret:.2f}, final a {matching.final_allocation}")
-    print(f"etc regret {etc.regret:.2f}, committed at epoch {etc.epochs}")
-    print(f"ztest regret {ztest.regret:.2f}, committed at epoch {ztest.epochs}")
-    print(f"pinn regret {pinn.regret:.2f}, committed at epoch {pinn.epochs}")
+    print(f"etc regret {etc.regret:.2f}, committed at epoch {etc.committed_at}")
+    print(f"ztest regret {ztest.regret:.2f}, committed at epoch {ztest.committed_at}")
+    print(f"pinn regret {pinn.regret:.2f}, committed at epoch {pinn.committed_at}")
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 """
-Small shared math utilities, problem-agnostic.
+Gaussian expectations: the free-information envelopes every problem is
+built on.
 """
 
 from __future__ import annotations

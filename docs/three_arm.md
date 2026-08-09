@@ -203,19 +203,19 @@ Substituting alpha_a = 1 - b - c into the section-5 equation and dropping the
 -max(0, m_b, m_c) constant (cannot move the argmax), the Hamiltonian is a
 quadratic on the triangle:
 
-    H(b, c) = b (m_b + Lab) + c (m_c + Lac)
-            - Lab b^2 - Lac c^2 + (Lbc - Lab - Lac) bc
+    H(b, c) = b (m_b + L_ab) + c (m_c + L_ac)
+            - L_ab b^2 - L_ac c^2 + (L_bc - L_ab - L_ac) bc
 
 The max of a quadratic over a triangle sits at an interior stationary point,
 an edge's stationary point, or a vertex — nowhere else. Seven candidates, all
 closed form:
 
     1.   interior: solve grad H = 0 (2x2 linear; safe-denominator its det
-         4 Lab Lac - (Lbc - Lab - Lac)^2); feasible iff b, c >= 0, b + c <= 1
+         4 L_ab L_ac - (L_bc - L_ab - L_ac)^2); feasible iff b, c >= 0, b + c <= 1
     2-4. edges — each one IS the two-arm clamped vertex:
-         c = 0:      b* = clamp( (m_b + Lab) / (2 Lab), 0, 1 )
-         b = 0:      c* = clamp( (m_c + Lac) / (2 Lac), 0, 1 )
-         b + c = 1:  s* = clamp( 1/2 + (m_b - m_c) / (2 Lbc), 0, 1 ),
+         c = 0:      b* = clamp( (m_b + L_ab) / (2 L_ab), 0, 1 )
+         b = 0:      c* = clamp( (m_c + L_ac) / (2 L_ac), 0, 1 )
+         b + c = 1:  s* = clamp( 1/2 + (m_b - m_c) / (2 L_bc), 0, 1 ),
                      (b, c) = (s*, 1 - s*)
     5-7. vertices: H(0,0) = 0, H(1,0) = m_b, H(0,1) = m_c
 
@@ -544,6 +544,60 @@ low-information states, the side the two_arm benchmark favors). This is
 exactly the analytic form of the old reactive scale $1 + |H - \text{commit}|$:
 that hack measured the premium magnitude per point empirically; the
 similarity analysis supplies the same magnitude as a law.
+
+## 15. REJECTED: the complementarity term (tried and dropped 2026-08-07)
+
+**The defect it targeted is real.** Where the simplex max sits at the
+do-nothing vertex, $f(0,0)=0$ identically, so the HJB reads $u=0$ there. The
+trained nets disagree with themselves on a band of states -- argmax at vertex
+a while the premium is still alive -- covering 7.8% (64:64:64) and 8.8%
+(k16) of the cloud. On that band the relative residual EQUALS the premium
+exactly (max discrepancy 0.00e+00 over 5114 points), so it is a 100% error
+by construction. It survives training because it is starved: per-point
+parameter gradient 2.9e-4 against 6.9e-3 for the bulk, ~20x down, since the
+similarity weight carries $(\det T)^{3/4}\sim\tau^{3/2}$ and the band sits at
+median $\tau_{bb}$ 0.09 against 0.37 for the cloud.
+
+**The fix tried.** A second graded term, `(committed * u)**2` averaged over
+the batch WITHOUT the similarity weight, added at weight $W$, with
+`committed` the exact test `best.x == 0 and best.y == 0` (the vertex
+candidate is a literal zero in the candidate stack, so the equality is exact,
+not a tolerance).
+
+**What happened.** It works on its target and costs more than it earns:
+
+| | baseline | $W=1$ (3700 it) | $W=0.1$ |
+|---|---|---|---|
+| band share | 7.8% | 5.7% | 6.6% |
+| pde mean-of-squares | 2.58e-6 | 3.92e-6 (+52%) | 2.68e-6 (+4%) |
+| pde p-mean | 7.67e-6 | 1.92e-5 (+150%) | 8.97e-6 |
+| control tie | 2.52e-7 | up 6x | 3.99e-7 (+58%) |
+| treatment tie | 1.20e-7 | up 11x | 1.69e-7 (+40%) |
+
+**Why rejected, three reasons, in order of weight.**
+
+1. It erodes the degeneracy breaker in EVERY configuration tried. Both walls
+   climb monotonically, 6-11x at $W=1$ and 40-58% at $W=0.1$ (4x for k16 at
+   the same setting). Since the term's own global minimum is $u\equiv 0$ --
+   the never-explore solution of section 12 -- it pulls in the same direction
+   as the documented attractor, and only the control tie opposes it.
+2. It cannot improve the pde number, by construction. The band carries just
+   9.8% of the pde loss, so a PERFECT fix caps the gain at ~10%; the same
+   $(\det T)^{3/4}$ suppression that let the defect survive also caps the
+   reward for repairing it. Judged on pde it can only break even.
+3. The premise was never measured. The band was hypothesised to drive the
+   arena's 10.4% three-arm wrong-commit rate; two training rounds were spent
+   without running the arena to check.
+
+**What is NOT established.** At $W=0.1$ the champion's blob signed bias fell
++4.41e-3 -> +3.39e-3 (best of that day) with pde flat. That run also had
+hours of extra training and there was no weight-0 control arm of equal
+length, so the improvement is unattributed. Do not cite it as evidence for
+the term.
+
+**Reopen only if** the arena establishes that three-arm regret is lost to
+premature commitment AND a weight-0 control run of equal length isolates the
+term's effect from ordinary training. Absent both, this is settled.
 
 ## To come
 

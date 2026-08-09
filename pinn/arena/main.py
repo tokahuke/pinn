@@ -63,7 +63,7 @@ def cli() -> None:
 @click.argument("runs", type=click.Path(dir_okay=False, path_type=Path))
 @click.option(
     "--problem",
-    type=click.Choice(["two_arm", "three_arm"]),
+    type=click.Choice(["two_arm", "two_arm_drift", "three_arm"]),
     default="two_arm",
     help="Which problem's zoo to sweep.",
 )
@@ -72,6 +72,13 @@ def cli() -> None:
 @click.option("--sigma", type=float, required=True)
 @click.option("--effect", type=float, required=True)
 @click.option("--effect-std", type=float, default=0.0, show_default=True)
+@click.option(
+    "--eta",
+    type=float,
+    default=0.0,
+    show_default=True,
+    help="Drift volatility of the true effect per epoch (two_arm_drift only).",
+)
 @click.option("--size", type=int, required=True)
 @click.option(
     "--workers",
@@ -87,6 +94,7 @@ def simulate(
     sigma: float,
     effect: float,
     effect_std: float,
+    eta: float,
     size: int,
     workers: int | None,
 ) -> None:
@@ -98,10 +106,9 @@ def simulate(
         effect=effect,
         effect_std=effect_std,
         size=size,
+        eta=eta,
     )
-    # Interleaved, not grouped by policy: a committing policy stops after tens of
-    # epochs where ProbabilityMatching runs all of them, so grouping would hand whole
-    # chunks of all-slow jobs to one worker. Seeded by REP, not by job: every
+    # Seeded by REP, not by job: every
     # policy in a rep sees the same effect draw and noise stream (until
     # allocations diverge), so cross-policy comparisons are paired.
     jobs = [
@@ -134,6 +141,13 @@ def analyze(runs: Path) -> None:
     """
     The report table: per policy, mean regret with 95% CI, ratio vs the best,
     wrong-commit share, commit share, and the median commit epoch.
+
+    CAVEAT under drift: `wrong%` scores the committed arm against `delta`,
+    which is the effect at epoch 0. When eta > 0 the truth moves afterwards, so
+    this reads "committed against the arm that was best when the run started",
+    not "against the arm that was best while committed". The honest drift
+    metric is the regret column, which is measured per epoch against the
+    moving oracle.
     """
     study: Study = pickle.loads(runs.read_bytes())
     by_policy: dict[str, list[Run]] = {}
@@ -161,7 +175,9 @@ def analyze(runs: Path) -> None:
         mean, ci = mean_ci([r.regret for r in runs_])
         committed = [r for r in runs_ if r.committed is not None]
         wrong = [r for r in committed if r.delta[r.committed] < max(r.delta)]
-        epochs = sorted(r.epochs for r in committed)
+        # committed_at, not epochs: the runner plays the full horizon now, so
+        # epochs is the horizon for every run and says nothing about commitment.
+        epochs = sorted(r.committed_at for r in committed)
         median = epochs[len(epochs) // 2] if epochs else None
         # Old studies predate the field; they read as 0.
         info, info_ci = mean_ci([getattr(r, "precision_time", 0.0) for r in runs_])

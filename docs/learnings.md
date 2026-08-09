@@ -208,9 +208,18 @@ bucketed by the suspected cause.
   independent re-verification.
 - **Record refutations with the measurement attached.** The graveyard
   (Fourier features, clamp-not-add, corner wall sampling, tanh saturation,
-  equation-units grading) prevents relearning; each entry carries the
-  experiment that killed it, so a future doubt can be re-run, not
-  re-argued.
+  equation-units grading, the complementarity term) prevents relearning;
+  each entry carries the experiment that killed it, so a future doubt can be
+  re-run, not re-argued.
+- **A term that reweights what the metric discounts cannot improve the
+  metric.** If a defect survives training because the residual weight is
+  small there, then the region's share of the loss is small too, and that
+  share is the ceiling on any repair (measured: 9.8%, three_arm's
+  complementarity band, docs/three_arm.md section 15). Worse, such a term
+  competes for capacity with the 90% and can erode the guard terms that
+  break a degeneracy. Before adding one, compute the region's share of the
+  objective — it is the entire prize — and decide whether the real
+  scoreboard is the loss at all.
 
 ## 7. The fat tail: attention is a loss-space instrument (2026-08-06)
 

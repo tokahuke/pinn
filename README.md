@@ -59,8 +59,10 @@ A quick map of the repo, for the curious:
   zoo (Thompson, explore-then-commit, z-test/elimination), and the PINN
   entrant. Run it with `poetry run arena simulate ...` and then
   `poetry run arena analyze ...`.
-- `train.py`, `probes.py`, `plot.py`, `benchmark3.py`, `validate.py`: CLIs
-  for training and diagnostics.
+- `pinn/cli`: the `pinn` command, one module per subcommand — `init` to
+  create an untrained checkpoint, `train` to train it, `plot` and `validate`
+  for two-arm diagnostics.
+- `probes.py`, `benchmark3.py`: three-arm diagnostics, still standalone.
 
 Trained models are published on the
 [latest release](https://github.com/tokahuke/pinn/releases/latest). If you
@@ -72,7 +74,13 @@ Everything else in this repo exists to train, test, and beat those two files.
 
 ```sh
 poetry install
-poetry run python train.py --problem three_arm     # train (Ctrl-C saves)
+
+# Create a net, then train it.
+poetry run pinn init --problem three_arm --topology 64:64:64k16 \
+    --out data/three_arm.pt
+# Trains in place: --out defaults to --in. Ctrl-C stops and saves.
+poetry run pinn train --problem three_arm --in data/three_arm.pt
+
 poetry run python probes.py --in data/three_arm.pt   # diagnostics
 poetry run arena simulate data/study.pkl --problem three_arm \
     --rho 0.999 --horizon 500 --sigma 1 --effect 0 --effect-std 0.3 --size 1000

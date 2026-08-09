@@ -12,7 +12,7 @@ import torch
 from pathlib import Path
 from torch import Tensor
 
-from pinn.problems.two_arm import ExplorationPremium, DimensionlessValueFunction
+from ..problems.two_arm import DimensionlessValueFunction, init_model
 
 TAUHAT = 0.01
 
@@ -117,10 +117,7 @@ def main(in_path: Path) -> None:
     """
     Render premium, policy, and residual as field-and-slice pngs in data/.
     """
-    state = torch.load(in_path)
-    hidden = [w.shape[0] for k, w in state.items() if k.endswith(".weight")][:-1]
-    value = DimensionlessValueFunction(ExplorationPremium(hidden))
-    value.load_state_dict(state)
+    value = init_model(state=torch.load(in_path))
 
     with torch.no_grad():
         u_field = value.premium(muhat_grid.flatten(), tauhat_grid.flatten()).reshape(

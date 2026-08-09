@@ -214,9 +214,7 @@ def two_arm_hero() -> None:
     all-in control, orange = all-in treatment), and each test rides the
     funnel until a wall commits it.
     """
-    value = TwoArmValue(
-        TwoArmDimensionless.load("data/value_2a_32:512.pt"), rho=1.0, sigma=1.0
-    )
+    value = TwoArmValue(TwoArmDimensionless.load("data/two_arm.pt"), rho=1.0, sigma=1.0)
 
     torch.manual_seed(5)
     m = torch.zeros(PATHS)

@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from torch import Tensor
 from torch.quasirandom import SobolEngine
 
+from ...utils import chi_squared_1, decade_scale, exponential, laplace
+
 # Sampling constants: the floor keeps det T >= PRIOR_FLOOR**2, fencing the
 # singular boundary of the information box. Numerical stability ONLY -- it
 # encodes no prior; the net is trained general down to priors ~30 sd wide.
@@ -60,8 +62,8 @@ class Sample:
         # cloud tracks the corridor at every information level (the two_arm
         # 2/sqrt(tauhat) trick, matrix edition).
         det = tau_bb * tau_cc - tau_bc**2
-        m_b = MEAN_SCALE * (tau_cc / det).sqrt() * _laplace(t[:, 3])
-        m_c = MEAN_SCALE * (tau_bb / det).sqrt() * _laplace(t[:, 4])
+        m_b = MEAN_SCALE * (tau_cc / det).sqrt() * laplace(t[:, 3])
+        m_c = MEAN_SCALE * (tau_bb / det).sqrt() * laplace(t[:, 4])
 
         return cls(m_b, m_c, tau_bb, tau_bc, tau_cc)
 
@@ -140,7 +142,7 @@ class RidgeSample:
         )
 
         det = tau_bb * tau_cc - tau_bc**2
-        m_c = -MEAN_SCALE * (tau_bb / det).sqrt() * _exponential(t[:, 3])
+        m_c = -MEAN_SCALE * (tau_bb / det).sqrt() * exponential(t[:, 3])
 
         return cls(m_c, tau_bb, tau_bc, tau_cc)
 
@@ -158,37 +160,9 @@ class RidgeSample:
 
         det = tau_bb * tau_cc - tau_bc**2
         deviation = 0.5 * ((tau_cc / det).sqrt() + (tau_bb / det).sqrt())
-        mean = -MEAN_SCALE * deviation * _exponential(t[:, 3])
+        mean = -MEAN_SCALE * deviation * exponential(t[:, 3])
 
         return cls(mean, tau_bb, tau_bc, tau_cc)
-
-
-def _exponential(u: Tensor) -> Tensor:
-    """
-    Unit exponential via inverse CDF, u in (0, 1).
-    """
-    return -(1.0 - u).log()
-
-
-def _chi_squared_1(u: Tensor) -> Tensor:
-    """
-    Chi-squared with 1 dof via inverse CDF, u in (0, 1): the square of a
-    standard normal. Density diverges at 0, so P(X < eps) ~ sqrt(eps): tiny
-    values are favored, not coincidental. Chosen for the pairwise precisions
-    so the startup corner (all three channels near zero information at once)
-    carries real sampling mass; independent Exp tails made it a ~1e-5 triple
-    coincidence and the policy was garbage exactly there.
-    """
-    return torch.special.ndtri(0.5 + 0.5 * u) ** 2
-
-
-def _laplace(u: Tensor) -> Tensor:
-    """
-    Unit Laplace via inverse CDF, u in (0, 1) -> two-sided heavy-ish tails.
-    """
-    centered = u - 0.5
-
-    return -centered.sign() * (1.0 - 2.0 * centered.abs()).log()
 
 
 def _precision_from_uniforms(
@@ -202,10 +176,10 @@ def _precision_from_uniforms(
     1: it moves all three precisions together, so low-information states of
     every magnitude are first-class events.
     """
-    scale = PRECISION_MEAN * torch.pow(10.0, -SCALE_DECADES * u_scale**2)
-    precision_ab = scale * _chi_squared_1(u_ab)
-    precision_ac = scale * _chi_squared_1(u_ac)
-    precision_bc = scale * _chi_squared_1(u_bc)
+    scale = PRECISION_MEAN * decade_scale(u_scale, SCALE_DECADES)
+    precision_ab = scale * chi_squared_1(u_ab)
+    precision_ac = scale * chi_squared_1(u_ac)
+    precision_bc = scale * chi_squared_1(u_bc)
 
     tau_bb = PRIOR_FLOOR + precision_ab + precision_bc
     tau_cc = PRIOR_FLOOR + precision_ac + precision_bc
@@ -243,9 +217,21 @@ if __name__ == "__main__":
     for name in vars(folded):
         assert torch.allclose(getattr(refolded, name), getattr(folded, name), atol=1e-5)
 
-    det_after = folded.tau_bb * folded.tau_cc - folded.tau_bc**2
+    # det T is preserved because the relabels are congruences by permutation
+    # matrices. That is exact algebra, so test it in float64: in float32 the
+    # fold's own pair-coordinate reassembly cancels (tau_bb + tau_bc is
+    # precision_ab, a difference of similar numbers when precision_bc
+    # dominates) and det then floors at PRIOR_FLOOR**2 = 1e-6 against O(1)
+    # products -- about one significant digit. Asserted in float32 at
+    # rtol=1e-4 this failed on ~7% of unseeded Sobol scrambles, silently,
+    # because the scramble is drawn from the global rng at import.
+    wide = Sample(*(field.double() for field in vars(draw).values()))
+    wide_folded, _ = wide.fold_ordered()
 
-    assert torch.allclose(det_after, det, rtol=1e-4)
+    det_before = wide.tau_bb * wide.tau_cc - wide.tau_bc**2
+    det_after = wide_folded.tau_bb * wide_folded.tau_cc - wide_folded.tau_bc**2
+
+    assert torch.allclose(det_after, det_before, rtol=1e-10)
 
     # Wall samplers: correct sign conventions and reachability.
     for wall in (RidgeSample.control_tie(500), RidgeSample.treatment_tie(500)):

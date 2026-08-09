@@ -27,14 +27,14 @@ State: conjugate posterior `(mu, tau)` — posterior mean and precision.
 
 For a given policy `alpha(mu, tau)`:
 
-    rho V = alpha*mu + (alpha(1-alpha)/sigma^2) * L[V]
+    rho V = alpha*mu + (alpha(1-alpha)/sigma^2) * L_ab[V]
 
-    L[V] := dV/dtau + (1/(2 tau^2)) d^2V/dmu^2
+    L_ab[V] := dV/dtau + (1/(2 tau^2)) d^2V/dmu^2
 
 The HJB is the same equation with `max over alpha in [0,1]` on the right side.
 The inner problem is a pointwise quadratic in `alpha`; interior FOC:
 
-    alpha* = 1/2 + sigma^2 * mu / (2 L[V])
+    alpha* = 1/2 + sigma^2 * mu / (2 L_ab[V])
 
 ## 3. Exploration-premium substitution
 
@@ -45,16 +45,16 @@ exploration premium — the value of learning over committing:
     U := V - max(mu, 0)/rho
 
 `U` is even in `mu` (antisymmetry), `U >= 0`, and `U = 0` exactly where exploration has
-stopped. WLOG work on `mu >= 0`, where `V = mu/rho + U` and `L[V] = L[U]` (`L` annihilates
+stopped. WLOG work on `mu >= 0`, where `V = mu/rho + U` and `L_ab[V] = L_ab[U]` (`L_ab` annihilates
 the linear part). Substituting `alpha*` into the maximized equation gives a quadratic in
-`L := L[V]`:
+writing `L_ab` for `L_ab[V]`:
 
     L^2 - (4 rho sigma^2 U + 2 sigma^2 mu) L + sigma^4 mu^2 = 0
 
 Branch selection: continuity of `alpha*` across `mu = 0` forces the double root at the ridge,
 which selects the `+` root globally on the corridor. It is a perfect square:
 
-    L[U] = sigma^2 * ( sqrt(rho U) + sqrt(rho U + mu) )^2        (mu >= 0)
+    L_ab[U] = sigma^2 * ( sqrt(rho U) + sqrt(rho U + mu) )^2        (mu >= 0)
 
     (expanded: sigma^2 * ( 2 rho U + mu + 2 sqrt(rho U (rho U + mu)) ))
 
@@ -73,7 +73,7 @@ Every parameter cancels identically:
     du/dtauhat + (1/(2 tauhat^2)) d^2u/dmuhat^2 = ( sqrt(u) + sqrt(u + muhat) )^2
 
 on the corridor `{ u >= 0 }`, `muhat >= 0` (even extension: replace `muhat` by `|muhat|`).
-Policy, in closed form (no operator left — use the PDE right side for `Lhat[u]`):
+Policy, in closed form (no operator left — use the PDE right side for `Lhat_ab[u]`):
 
     alpha* = 1/2 + muhat / ( 2 (sqrt(u) + sqrt(u + muhat))^2 )
 
@@ -105,7 +105,7 @@ The operator is second-order in `muhat`, first-order in `tauhat`, on the half-st
 
 Use these as consistency checks on any numerical solution:
 
-- Double-root/ridge identity: `Lhat[u]|_{0+} = 4 u|_0` — the PDE evaluated at the ridge
+- Double-root/ridge identity: `Lhat_ab[u]|_{0+} = 4 u|_0` — the PDE evaluated at the ridge
   (right side -> `4u` at `muhat = 0`); checks branch consistency numerically.
 - Positivity: `u > 0` in the open corridor; `u = 0` outside — the premium vanishes exactly
   where you commit.

@@ -158,7 +158,9 @@ class DimensionlessValueFunction(nn.Module):
     def forward(self, muhat: Tensor, tauhat: Tensor) -> Tensor:
         return torch.relu(muhat) + self.premium(muhat, tauhat)
 
-    def hamiltonian(self, muhat: Tensor, tauhat: Tensor) -> tuple[Tensor, Maximum]:
+    def hamiltonian(
+        self, muhat: Tensor, tauhat: Tensor
+    ) -> tuple[Tensor, Maximum, Tensor]:
         """
         The HJB's two sides on the similarity chart (z, s), where the operator
 
@@ -166,10 +168,11 @@ class DimensionlessValueFunction(nn.Module):
 
         is O(1)-conditioned at every information level (docs/two_arm.md
         section 8): the equation reads e^s (z + g) = max over alpha of
-        alpha e^s z + alpha(1-alpha) L_ab[g]. Returns the left side and the
-        maximization, both graph-connected to the premium's parameters, so
-        pde_loss grades their gap and policy reads the argmax off the same
-        derivation. muhat >= 0 only, like forward.
+        alpha e^s z + alpha(1-alpha) L_ab[g]. Returns the left side, the
+        maximization, and L_ab itself -- all graph-connected to the premium's
+        parameters, so pde_loss grades the gap AND the operator's sign, and
+        policy reads the argmax off the same derivation. muhat >= 0 only,
+        like forward.
         """
         z = (muhat * tauhat.sqrt()).detach().requires_grad_(True)
         s = tauhat.log().detach().requires_grad_(True)
@@ -181,14 +184,14 @@ class DimensionlessValueFunction(nn.Module):
         l_ab = g_s + 0.5 * g_zz + 0.5 * z * g_z - 0.5 * g
         best = maximize_quadratic(-l_ab, s.exp() * z + l_ab)
 
-        return s.exp() * (z + g), best
+        return s.exp() * (z + g), best, l_ab
 
     def policy(self, muhat: Tensor, tauhat: Tensor) -> Tensor:
         """
         The argmax allocation (treatment share). muhat >= 0 only, like
         forward; ValueFunction.policy handles the arm swap.
         """
-        _, best = self.hamiltonian(muhat, tauhat)
+        _, best, _ = self.hamiltonian(muhat, tauhat)
 
         return best.x.detach()
 

@@ -17,12 +17,17 @@ from .simplex import maximize_quadratic
 RIDGE_WEIGHT = 10.0
 POWER = 2.0
 
+# The champion was trained by escalating this ABOVE 6e0; retraining here will
+# not reproduce it.
+POSITIVITY_WEIGHT = 6.0e-2
+
 
 def pde_loss(
     value: DimensionlessValueFunction, muhat: Tensor, tauhat: Tensor
-) -> Tensor:
+) -> tuple[Tensor, Tensor]:
     """
-    Squared residual of the HJB in similarity coordinates (docs/two_arm.md
+    Returns TWO numbers. The first is the squared residual of the HJB in
+    similarity coordinates (docs/two_arm.md
     section 8), maximization kept explicit. With z = muhat sqrt(tauhat),
     s = log tauhat, g = sqrt(tauhat) u, and the O(1) operator
 
@@ -41,10 +46,15 @@ def pde_loss(
 
     KNOWN DEGENERATE on its own: g = 0 (the never-explore solution) zeroes
     this residual exactly. The ridge loss breaks the degeneracy.
+
+    The second is the mean of relu(-L_ab). L_ab >= 0 is provable, and where it
+    fails the Hamiltonian turns convex and the max jumps to a vertex -- the
+    policy commits on no evidence. LINEAR, not squared: squaring chases depth
+    while the violating fraction rises (two_arm_drift, 2026-08-08).
     """
     # The derivation (similarity chart, L_ab[g], interval max) lives on the
     # model: one chain serves training and policy readout.
-    lhs, best = value.hamiltonian(muhat, tauhat)
+    lhs, best, l_ab = value.hamiltonian(muhat, tauhat)
 
     # No relative scale: the raw-coordinate loss needed one because its
     # coefficients spanned nine decades, but this equation self-normalizes
@@ -58,7 +68,10 @@ def pde_loss(
     graded = (lhs - best.value).pow(2)
     scale = graded.mean().detach().clamp_min(1e-30)
 
-    return scale * (graded / scale).pow(POWER).mean().pow(1.0 / POWER)
+    return (
+        scale * (graded / scale).pow(POWER).mean().pow(1.0 / POWER),
+        torch.relu(-l_ab).mean(),
+    )
 
 
 def ridge_loss(value: DimensionlessValueFunction, ridge_tauhat: Tensor) -> Tensor:
@@ -82,15 +95,19 @@ def loss(
     iteration: int | None = None,
 ) -> Tensor:
     """
-    Full training loss: interior residual plus the weighted ridge condition.
+    Full training loss: interior residual, the weighted ridge condition, and
+    the learning operator's negative part.
     """
-    pde = pde_loss(value, muhat, tauhat)
+    pde, pos_learning = pde_loss(value, muhat, tauhat)
     ridge = ridge_loss(value, ridge_tauhat)
 
     if iteration is not None:
-        print(f"iter {iteration}: pde {pde.item():.3e}  ridge {ridge.item():.3e}")
+        print(
+            f"iter {iteration}: pde {pde.item():.3e}  ridge {ridge.item():.3e}"
+            f"  pos_learning {pos_learning.item():.3e}"
+        )
 
-    return pde + RIDGE_WEIGHT * ridge
+    return pde + RIDGE_WEIGHT * ridge + POSITIVITY_WEIGHT * pos_learning
 
 
 def objective(batch: int = 1024) -> Objective:
@@ -125,6 +142,20 @@ if __name__ == "__main__":
         ).item()
         < 1e-12
     )
+
+    # The never-explore solution scores exactly 0 on both numbers.
+    class _Dead(nn.Module):
+        # SQUARED in muhat: hamiltonian takes g_zz without allow_unused.
+        def forward(self, muhat: Tensor, tauhat: Tensor) -> Tensor:
+            return 0.0 * muhat**2 * tauhat
+
+    dead_pde, dead_positivity = pde_loss(
+        DimensionlessValueFunction(_Dead()),
+        torch.rand(256) + 0.05,
+        torch.rand(256) + 0.05,
+    )
+
+    assert dead_pde.item() == 0.0 and dead_positivity.item() == 0.0
 
     value = DimensionlessValueFunction(ExplorationPremium([16, 16]))
     objective_value = objective(batch=256)(value, None)

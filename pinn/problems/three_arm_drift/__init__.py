@@ -1,6 +1,6 @@
 """
 Three-armed Bayesian allocation with drifting arm means. Maths in
-docs/three_arm_drift.md; read docs/three_arm.md first.
+kb/three_arm_drift.md; read kb/three_arm.md first.
 
 Layout mirrors three_arm, minus simplex.py: the erosion drift adds is
 control-free, so it never touches the maximization and three_arm's simplex is
@@ -13,7 +13,14 @@ than a warm start.
 """
 
 from .envelope import envelope
-from .loss import control_tie_loss, loss, objective, pde_loss, treatment_tie_loss
+from .loss import (
+    control_tie_loss,
+    draw,
+    loss,
+    objective,
+    pde_loss,
+    treatment_tie_loss,
+)
 from .model import (
     DimensionlessValueFunction,
     init_model,

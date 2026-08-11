@@ -16,7 +16,8 @@ The grid that motivates the split:
     sigma_policy != sigma          the cost of misjudging the noise
 
 with eta = eta_policy = 0 and sigma_policy = sigma reproducing the two_arm
-arena exactly.
+arena exactly -- Pinn included since 2026-08-09, when the prior fold was
+restored to the filter (see Pinn's docstring for what the flat start cost).
 """
 
 from __future__ import annotations
@@ -224,10 +225,30 @@ class Pinn(Filter):
 
     Its etahat is the POLICY's eta, so one checkpoint plays every column of the
     misspecification grid -- that is what carrying etahat as a net input buys.
+
+    The prior is folded INTO the filter: the belief starts at (0, prior_tau)
+    and erosion acts on it like any other precision, so the mean the net sees
+    is properly shrunk. At eta = 0 this reduces exactly to two_arm's conjugate
+    entrant. The earlier flat start floored only the tau INPUT while handing
+    the net the raw mean -- almost pure noise for the first ~1/(floor eta...)
+    epochs but dressed as evidence -- and the policy committed on the noise's
+    decay timescale instead of an evidence timescale (drift_grid 2026-08-09:
+    precision time 145 vs 296, wrong commits 2x, the whole drift-column
+    deficit).
     """
 
     prior_std: float | None = None
     value: ValueFunction | None = None
+
+    def __post_init__(self) -> None:
+        self.precision = self.prior_tau
+
+    @property
+    def prior_tau(self) -> float:
+        if self.prior_std is not None:
+            return 1.0 / self.prior_std**2
+
+        return _FLATTEST_TAUHAT / ((1.0 - self.params.rho) * self.sigma**2)
 
     @classmethod
     def init(cls, params: Params) -> Self:
@@ -242,11 +263,9 @@ class Pinn(Filter):
         return policy
 
     def propose(self) -> Tensor:
-        gamma = 1.0 - self.params.rho
-        floor = _FLATTEST_TAUHAT / (gamma * self.sigma**2)
-
-        if self.prior_std is not None:
-            floor = 1.0 / self.prior_std**2
+        # The trust guard on the net INPUT only: erosion can pull the eroded
+        # prior below the flattest tauhat the checkpoint supports.
+        floor = _FLATTEST_TAUHAT / ((1.0 - self.params.rho) * self.sigma**2)
         tau = max(self.precision, floor)
 
         return _split(
@@ -317,6 +336,26 @@ def demo() -> None:
 
     assert abs(aware.precision - fixed_point) < 1e-6, (aware.precision, fixed_point)
     assert fixed_point > 1.0 / (2.0 * 1.0 * drift)
+
+    # The prior fold: at eta = 0 the Pinn filter carries exactly two_arm's
+    # conjugate posterior -- same shrunk mean, same precision. sigma = 1, where
+    # the two zoos' observation conventions (design vs precision) coincide.
+    from .two_arm import _FLATTEST_TAUHAT as TWO_ARM_FLATTEST, Pinn as TwoArmPinn
+
+    assert TWO_ARM_FLATTEST == _FLATTEST_TAUHAT
+
+    drift_pinn = Pinn(params=static.params, sigma=1.0, eta=0.0)
+    conjugate = TwoArmPinn(params=static.params)
+
+    for estimate in (0.8, -0.3, 1.4, 0.1):
+        drift_pinn.observe((estimate, 0.25))
+        conjugate.observe((estimate, 0.25))
+
+    prior_tau = _FLATTEST_TAUHAT / (1.0 - static.params.rho)
+    total_tau = prior_tau + conjugate.total_precision
+
+    assert abs(drift_pinn.precision - total_tau) < 1e-12
+    assert abs(drift_pinn.mean - conjugate.total / total_tau) < 1e-12
 
     print(f"matching regret {matching.regret:.2f}, final a {matching.final_allocation}")
     print(f"etc regret {etc.regret:.2f}, committed at epoch {etc.committed_at}")

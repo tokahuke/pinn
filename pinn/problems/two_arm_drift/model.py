@@ -40,7 +40,7 @@ class ExplorationPremium(nn.Module):
 
     Read two_arm's docstring first; everything it says about the response map,
     the feature choices and the rational saturation still applies. The envelope
-    is docs/two_arm_drift.md section 7, the fifth feature is section 8.
+    is kb/two_arm_drift.md section 7, the fifth feature is section 8.
 
     RESPONSE: two_arm's, unchanged. It maps into [0, 1), so 0 <= u < envelope
     is ARCHITECTURAL, and it reaches exactly 0 with a curvature jump. Two
@@ -117,25 +117,49 @@ class ExplorationPremium(nn.Module):
         Bitwise at etahat = 0: same response map as two_arm, and the envelope
         collapses onto nu there, so the stitched net IS the source. That exact
         bootstrap is what the shared map buys, and the __main__ check holds it.
+
+        WIDER targets graft the same way, function-preserving: the source block
+        lands in the leading slice, new OUTPUT units keep this net's fresh init,
+        and every new INPUT column is ZEROED so nothing new feeds the old path.
+        The one-feature pad is the same rule on the input dimension.
         """
         state = dict(source)
-        weight = state["net.0.weight"]
 
-        if weight.shape[1] == FEATURE_COUNT - 1:
-            state["net.0.weight"] = torch.cat(
-                [weight, torch.zeros_like(weight[:, :1])], dim=1
-            )
+        if state["net.0.weight"].shape[1] == FEATURE_COUNT - 1:
             state["feature_scale"] = torch.cat(
                 [state["feature_scale"], self.feature_scale[-1:]]
             )
 
-        # A source without kinks keeps this net's zero-init branch, so the
-        # graft is bit-exact at step 0. Only kink keys are defaulted: anything
-        # else missing is a real mismatch and should fail loudly.
-        for name, tensor in self.state_dict().items():
-            if name.startswith("kink_"):
-                state.setdefault(name, tensor)
-        self.load_state_dict(state)
+        grafted = {}
+
+        for name, want in self.state_dict().items():
+            have = state.get(name)
+
+            # A source without kinks keeps this net's zero-init branch, so the
+            # graft is bit-exact at step 0. Only kink keys are defaulted:
+            # anything else missing is a real mismatch and should fail loudly.
+            if have is None:
+                if not name.startswith("kink_"):
+                    raise KeyError(f"source is missing {name}")
+
+                grafted[name] = want
+                continue
+
+            if have.shape == want.shape:
+                grafted[name] = have
+                continue
+
+            room = want.clone()
+
+            if room.dim() == 2:
+                room[:, have.shape[1] :] = 0.0
+                room[: have.shape[0], : have.shape[1]] = have
+            else:
+                room[: have.shape[0]] = have
+
+            grafted[name] = room
+
+        self.load_state_dict(grafted)
 
     def _features(self, muhat: Tensor, tauhat: Tensor, etahat: Tensor) -> Tensor:
         """
@@ -198,7 +222,7 @@ class DimensionlessValueFunction(nn.Module):
     ) -> tuple[Tensor, Maximum, Tensor]:
         """
         The HJB's two sides on the similarity chart (z, s) of
-        docs/two_arm_drift.md section 6, where with
+        kb/two_arm_drift.md section 6, where with
 
             L_ab[g]      = g_s + (1/2) g_zz + (z/2) g_z - (1/2) g
             tauhat_slope = L_ab[g] - (1/2) g_zz
@@ -388,6 +412,37 @@ if __name__ == "__main__":
     # And the branch is trainable, not decoration.
     assert grafted.kink_out.weight.requires_grad
     assert (grafted.kink_in.bias == 0.5).all()
+
+    # Function-preserving: a wider graft computes the same function at step 0.
+    # Not bitwise -- the matmuls accumulate over more (zero) columns.
+    narrow = ExplorationPremium([16, 8])
+    wider = ExplorationPremium([48, 24])
+    wider.stitch(narrow.state_dict())
+
+    assert torch.allclose(
+        wider(muhat, tauhat, etahat),
+        narrow(muhat, tauhat, etahat),
+        rtol=1e-5,
+        atol=1e-7,
+    )
+
+    # The headroom is trainable: new units are live, simply unheard until their
+    # output weights leave zero.
+    assert wider.net[0].weight.shape == (48, FEATURE_COUNT)
+    assert (wider.net[2].weight[:, 16:] == 0.0).all()
+    assert (wider.net[4].weight[:, 8:] == 0.0).all()
+    assert wider.net[2].weight.requires_grad
+
+    # Composes with the kink graft: both are the same leading-slice rule.
+    both = ExplorationPremium([48, 24], kinks=8)
+    both.stitch(narrow.state_dict())
+
+    assert torch.allclose(
+        both(muhat, tauhat, etahat),
+        narrow(muhat, tauhat, etahat),
+        rtol=1e-5,
+        atol=1e-7,
+    )
 
     # Bitwise, not merely close: the exact bootstrap
     # `pinn init --problem two_arm_drift --from data/two_arm.pt` rests on it.

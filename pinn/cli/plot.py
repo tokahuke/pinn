@@ -14,7 +14,7 @@ from torch import Tensor
 
 from ..problems.two_arm import DimensionlessValueFunction, init_model
 
-TAUHAT = 0.01
+TAUHAT = 0.1
 
 muhat_axis = torch.linspace(1e-3, 2.5, 301)
 tauhat_axis = torch.linspace(0.1, 4.0, 301)
@@ -52,7 +52,7 @@ def policy_and_residual(
 
 def ansatz_policy(muhat: Tensor, tauhat: float) -> Tensor:
     """
-    Approximate self-similar policy (docs/two_arm.md section 7), scaled score
+    Approximate self-similar policy (kb/two_arm.md section 7), scaled score
     q = muhat sqrt(tauhat) / sqrt(2 h(8 tauhat)).
     """
     t = torch.linspace(0.0, 80.0, 200001)
@@ -110,7 +110,7 @@ def save(ax: plt.Axes, filename: str) -> None:
     "--in",
     "in_path",
     type=click.Path(exists=True, path_type=Path),
-    default=Path("data") / "value.pt",
+    default=Path("data") / "two_arm.pt",
     help="Checkpoint to plot.",
 )
 def main(in_path: Path) -> None:

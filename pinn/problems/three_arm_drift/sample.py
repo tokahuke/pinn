@@ -28,9 +28,17 @@ MEAN_SCALE = 2.0
 # mean a different thing at every etahat.
 SHAPE_FLOOR = 1e-3
 
+# Absolute cap on the det ceiling as etahat -> 0 (two_arm_drift's TAUHAT_MAX,
+# det edition): the ceiling diverges as 1/etahat^2, and uncapped it put 17% of
+# the cloud beyond det ~ 1e2 (up to 3.8e12, measured 2026-08-09) -- decades
+# the static law never reaches (its max det ~ 8e2) and whose taus miscalibrate
+# feature_scale ~1000x on the raw tau features while railing grafted nets'
+# first tanh layer. 1e3 sits just above the static law's reach.
+DET_MAX = 1e3
+
 # etahat law, two_arm_drift's shape at 1/sqrt2 of its scale: two_arm's eta is a
 # contrast volatility and ours is per arm, so the same physical world sits
-# lower here (doc section 0). Deployment lands near 7.5.
+# lower here (doc section 0).
 ETAHAT_SCALE = 14.0
 ETAHAT_DECADES = 4.0
 ETAHAT_MAX = 35.0
@@ -219,7 +227,11 @@ def _precision_from_uniforms(
     fraction = (decade_scale(u_scale, SCALE_DECADES) * exponential(u_tail)).clamp(
         max=1.0
     )
-    ceiling_det = 1.0 / (2.0 * SQRT3 * etahat.clamp_min(1e-12) ** 2)
+    # etahat floored where the drift ceiling meets the static cap DET_MAX, so
+    # the etahat -> 0 anchor stays inside the decades training can see.
+    ceiling_det = 1.0 / (
+        2.0 * SQRT3 * etahat.clamp_min((2.0 * SQRT3 * DET_MAX) ** -0.5) ** 2
+    )
     target_det = (fraction * ceiling_det).clamp_min(PRIOR_FLOOR**2)
 
     # det scales as the square, so the linear multiplier is the square root.
@@ -251,11 +263,11 @@ if __name__ == "__main__":
 
     # Relative slack, same float32 cancellation as the ceiling check below.
     assert (det >= PRIOR_FLOOR**2 * 0.99).all(), det.min().item()
+    assert (det <= DET_MAX * 1.001).all(), det.max().item()
 
     # The ceiling, on the PHYSICAL quantity and with nothing subtracted off the
     # left side -- subtracting the floor back out would only test that clamp
-    # clamps. The far tail of etahat is where the floor lifts a state back over
-    # the ceiling, which is why this is a share and not an all().
+    # clamps.
     ratio = 2.0 * SQRT3 * draw.etahat**2 * det
 
     # Exact in exact arithmetic -- det is placed, not floored. The slack is
@@ -266,8 +278,8 @@ if __name__ == "__main__":
     assert (ratio > 0.9).float().mean() > 0.05, "no mass on the ceiling"
     assert ((ratio > 0.05) & (ratio < 0.9)).float().mean() > 0.2, "nothing mid-band"
 
-    # etahat spans what deployment needs (near 7.5) and still reaches the
-    # three_arm anchor at 0.
+    # The law's own high decades carry real mass, and etahat still reaches
+    # the three_arm anchor at 0.
     assert (draw.etahat < 0.01).float().mean() > 0.05, "no mass at the anchor"
     assert ((draw.etahat > 3.0) & (draw.etahat < 20.0)).float().mean() > 0.15
     assert draw.etahat.min().item() < 1e-4
@@ -304,6 +316,7 @@ if __name__ == "__main__":
         assert (wall.tau_bb + wall.tau_bc > 0).all()
         assert (wall.tau_cc + wall.tau_bc > 0).all()
         assert (wall_det >= PRIOR_FLOOR**2 * 0.99).all(), wall_det.min().item()
+        assert (wall_det <= DET_MAX * 1.001).all(), wall_det.max().item()
         assert (2.0 * SQRT3 * wall.etahat**2 * wall_det <= 1.0 + 1e-3).all()
         assert (wall.etahat >= 0.0).all() and (wall.etahat <= ETAHAT_MAX).all()
         assert (wall.etahat < 0.01).float().mean() > 0.03

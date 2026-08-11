@@ -11,10 +11,23 @@ configs.
 
 Policies play prior-blind (priors are policy parameters, never the
 environment's effect distribution). The PINN entrants run the champion
-checkpoints of this date — two_arm `value_2a_32:512.pt`, three_arm
-`value_3a_64:64:64.pt` (both on the `checkpoints-2026-08-06` release) — with
-the near-flat default prior, evaluated directly (no policy table), commits
-landing on exact simplex vertices.
+checkpoints of this date — two_arm `value_2a_32:512.pt` from
+`data/frontier4k.pkl`, three_arm `value_3a_64:64:64.pt` from
+`data/frontier3a.pkl` (both nets on the `checkpoints-2026-08-06` release) —
+with the near-flat default prior, evaluated directly (no policy table),
+commits landing on exact simplex vertices. Those two filenames are historical
+and no longer resolve; see the staleness note.
+
+**Stale as of 2026-08-10 — the numbers are right, the nets are not.** Every
+row below was re-derived from the two raw studies on 2026-08-10 and
+reproduces exactly, so the tables stand as a faithful record of what those
+checkpoints did at size 4,000. Both nets have since been replaced: the
+two_arm one was deleted (it was byte-identical to what is now
+`data/two_arm.2026-08-09.pt`), and the three_arm path was repointed
+2026-08-07, retrained through the concavity term on 2026-08-10, and retrained
+again under the natural-units grading fix (learnings section 3, which also
+moved every loss figure onto a new scale). Re-run both sweeps once those
+retrains land; until then read the ratios as two-to-three generations old.
 
 ## Two arms
 
@@ -66,5 +79,5 @@ to TS = 1.00 above for comparability with the two-arm table.)
 
 Reproduce: `poetry run arena simulate <out.pkl> --problem two_arm|three_arm
 --rho ... --size 4000 --workers 8`, then `poetry run arena analyze <out.pkl>`.
-Raw studies of this date: `data/frontier4k.pkl`, `data/frontier3a.pkl`
-(gitignored, parameter-bearing).
+Raw studies of this date: `data/frontier4k.pkl` (two arms),
+`data/frontier3a.pkl` (three arms) — gitignored, parameter-bearing.

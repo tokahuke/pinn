@@ -60,6 +60,22 @@ def decade_scale(u: Tensor, decades: float) -> Tensor:
     return torch.pow(10.0, -decades * u**2)
 
 
+def truncated_pareto(u: Tensor, low: float, high: float) -> Tensor:
+    """
+    Log-uniform on [low, high]: a truncated Pareto at shape alpha = 0, whose
+    density is proportional to 1/x, i.e. equal mass in every decade.
+
+    MONOTONE in u, which is why it beats a product of two laws: a Sobol
+    coordinate is near-uniform within a batch, so a monotone map hands every
+    batch the same composition. Matters when the coordinate indexes a family
+    whose gradients partly cancel (two_arm_drift: batch-to-batch gradient
+    cosine 0.22 under a two-coordinate law, 0.94 under this one).
+
+    Reaches its bounds only in the limit, so it welds no point mass to either.
+    """
+    return low * (high / low) ** u
+
+
 if __name__ == "__main__":
     torch.manual_seed(0)
     u = torch.rand(400_000, dtype=torch.float64)
@@ -84,4 +100,21 @@ if __name__ == "__main__":
 
     assert scale.max().item() <= 1.0 and scale.min().item() >= 1e-3
     assert scale.gt(0.1).float().mean().item() > 0.5
+
+    # truncated_pareto: bounded, log-uniform, and equal mass per decade -- the
+    # three decades of [1e-3, 1] must each carry a third of the draw.
+    pareto = truncated_pareto(u, 1.0e-3, 1.0)
+
+    assert pareto.min().item() >= 1.0e-3 and pareto.max().item() <= 1.0
+    assert abs(truncated_pareto(torch.tensor(0.5), 1.0e-4, 1.0).item() - 1.0e-2) < 1e-9
+
+    for low, high in [(1e-3, 1e-2), (1e-2, 1e-1), (1e-1, 1.0)]:
+        share = ((pareto >= low) & (pareto < high)).float().mean().item()
+
+        assert abs(share - 1.0 / 3.0) < 0.01, (low, high, share)
+
+    # Monotone, which is the property the samplers rely on.
+    rising = truncated_pareto(torch.linspace(0.0, 1.0, 1000), 1e-3, 50.0)
+
+    assert (rising.diff() > 0).all()
     print("ok")

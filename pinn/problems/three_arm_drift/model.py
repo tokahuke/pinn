@@ -19,7 +19,7 @@ from ..three_arm.simplex import Maximum, maximize_quadratic
 from .envelope import envelope as premium_cap
 from .sample import Sample
 
-# three_arm's fourteen, plus the drift coordinate.
+# three_arm's fifteen, plus the drift coordinate.
 FEATURE_COUNT = 16
 
 SQRT3 = math.sqrt(3.0)
@@ -41,7 +41,7 @@ class ExplorationPremium(nn.Module):
     Plain function on the wedge, no symmetry machinery (fold + wall losses
     carry S3); the feature list in forward; one GainedTanh MLP over the
     stacked features, Xavier-tanh init, shallow profile; the free-information
-    envelope of doc section 13 multiplying the relu-squared rational response
+    envelope of doc section 7 multiplying the relu-squared rational response
     (relu(r)**2 / (1 + relu(r)**2)).
     Warm-starting from the two_arm champion is deferred to v2 by the
     one-variable-at-a-time rule.
@@ -102,7 +102,7 @@ class ExplorationPremium(nn.Module):
             nn.init.constant_(self.kink_in.bias, 0.5)
 
         # Envelope scale, init 0: at scale exactly 1 the envelope is a proven
-        # upper bound on the true premium (doc section 13), so the whole
+        # upper bound on the true premium (doc section 7), so the whole
         # solution starts inside the tanh range.
         self.log_scale = nn.Parameter(torch.zeros(()))
 
@@ -225,7 +225,7 @@ class ExplorationPremium(nn.Module):
                 # The drift coordinate, LAST because the graft pads on the
                 # right. It is the state's share of the ceiling drift imposes,
                 # which is exactly the erosion term's own coefficient
-                # (docs/three_arm_drift.md sections 6 and 8): bounded on the
+                # (kb/three_arm_drift.md sections 6 and 8): bounded on the
                 # reachable set, unchanged by shuffling arm labels since det T
                 # is the invariant, and exactly 0 at etahat = 0 -- which is
                 # what makes the three_arm graft bitwise rather than close.
@@ -255,14 +255,14 @@ class ExplorationPremium(nn.Module):
             bumps = torch.relu(self.kink_in(scaled)) ** 2
             response = response + self.kink_out(bumps / (1.0 + bumps)).squeeze(-1)
 
-        # The EXACT free-information value E[max(0, theta_b, theta_c)] under
-        # the posterior (doc sections 13-14): a proven upper bound that is
-        # also the exact startup solution, correlation dependence included --
-        # the response tends to 1 as information goes to zero, so the floor
-        # decades ask nothing of the net (the nu-sum predecessor was 1.17x
-        # to 1.87x loose there and bred a never-explore attractor). No
-        # correlation clamp: k < 1 strictly on reachable states, and a clamp
-        # would kink d(envelope)/d(tau_bc) exactly where the corner needs it.
+        # The free-information envelope of doc section 7: three_arm's exact
+        # nu2 plus one closed-form drift correction per pair, collapsing
+        # BITWISE onto nu2 at etahat = 0. A proven upper bound; under drift
+        # it is 1-3% loose at the startup pin rather than exact (three_arm's
+        # nu-sum predecessor was 1.17x to 1.87x loose there and bred a
+        # never-explore attractor). No correlation clamp: k < 1 strictly on
+        # reachable states, and a clamp would kink d(envelope)/d(tau_bc)
+        # exactly where the corner needs it.
         envelope = self.log_scale.exp() * premium_cap(
             m_b, m_c, tau_bb, tau_bc, tau_cc, etahat
         )
@@ -291,7 +291,7 @@ class DimensionlessValueFunction(nn.Module):
     The thing training grades: v = max(0, m_b, m_c) + u. The commit envelope
     carries all three kinks (hand-written relu-of-max); the premium net stays
     smooth, exactly the two_arm division of labor. Units rho = sigma = 1,
-    which is the dimensionless form (doc section 11), and the premium is
+    which is the dimensionless form (doc section 4), and the premium is
     only trained on the fundamental wedge -- deployment goes through
     ValueFunction, which papers over both cuts.
     """
@@ -334,10 +334,12 @@ class DimensionlessValueFunction(nn.Module):
         tau_bc: Tensor,
         tau_cc: Tensor,
         etahat: Tensor,
-    ) -> tuple[Tensor, Maximum]:
+    ) -> tuple[Tensor, Maximum, tuple[Tensor, Tensor, Tensor]]:
         """
         The HJB's two sides on wedge states: the value v and the maximized
-        Hamiltonian (doc section 10). Pairwise learning numbers: for pair
+        Hamiltonian (three_arm.md section 10). Returns the learning numbers
+        (l_ab, l_ac, l_bc) as well, for the loss's sampled-direction
+        concavity grading. Pairwise learning numbers: for pair
         direction dir, w = T^{-1} dir, and L = mean-diffusion Ito term
         (1/2) w' D2m(v) w plus the precision-drift term (dir-form on dv/dT);
         H(b, c) = b (m_b + l_ab) + c (m_c + l_ac) - l_ab b^2 - l_ac c^2
@@ -405,8 +407,12 @@ class DimensionlessValueFunction(nn.Module):
 
         left = v + erosion_bb * v_tbb + erosion_bc * v_tbc + erosion_cc * v_tcc
 
-        return left, maximize_quadratic(
-            -l_ab, -l_ac, l_bc - l_ab - l_ac, m_b + l_ab, m_c + l_ac
+        return (
+            left,
+            maximize_quadratic(
+                -l_ab, -l_ac, l_bc - l_ab - l_ac, m_b + l_ab, m_c + l_ac
+            ),
+            (l_ab, l_ac, l_bc),
         )
 
     def policy(
@@ -423,7 +429,7 @@ class DimensionlessValueFunction(nn.Module):
         (alpha_a, alpha_b, alpha_c). Wedge states only, like forward;
         ValueFunction.policy handles fold and physical arm labels.
         """
-        _, best = self.hamiltonian(m_b, m_c, tau_bb, tau_bc, tau_cc, etahat)
+        _, best, _ = self.hamiltonian(m_b, m_c, tau_bb, tau_bc, tau_cc, etahat)
 
         return torch.stack([1.0 - best.x - best.y, best.x, best.y], dim=-1).detach()
 
@@ -432,11 +438,11 @@ class ValueFunction(nn.Module):
     """
     Deployment-facing value: real units in and out, any reachable state.
 
-    Wraps a trained DimensionlessValueFunction with the doc section 11
-    readout dictionary -- mhat = m / (sigma sqrt(rho)), tauhat = rho sigma^2
-    tau, etahat = eta / (rho sigma), V = (sigma / sqrt(rho)) vhat -- and folds
-    arbitrary states into the
-    fundamental wedge for the premium (S3-invariant, doc section 6), keeping
+    Wraps a trained DimensionlessValueFunction with the three_arm.md
+    section 11 readout dictionary -- mhat = m / (sigma sqrt(rho)), tauhat =
+    rho sigma^2 tau, etahat = eta / (rho sigma), V = (sigma / sqrt(rho)) vhat
+    -- and folds arbitrary states into the
+    fundamental wedge for the premium (S3-invariant, doc section 1), keeping
     the commit term in physical labels. States must still be reachable
     (tau_bc <= 0, pair coordinates nonnegative); rho = sigma = 1 on wedge
     states recovers the dimensionless form exactly.
@@ -614,7 +620,7 @@ if __name__ == "__main__":
 
     # The deployment wrapper: at rho = sigma = 1, eta = 0 on wedge states it
     # equals the dimensionless form; it is b<->c relabel invariant on any
-    # state; and units scale exactly by the section 11 dictionary.
+    # state; and units scale exactly by the three_arm.md section 11 dictionary.
     dimensionless = DimensionlessValueFunction(premium)
     wrapper = ValueFunction(dimensionless, rho=1.0, sigma=1.0, eta=0.0)
     flat = (draw.m_b, draw.m_c, draw.tau_bb, draw.tau_bc, draw.tau_cc, zero)

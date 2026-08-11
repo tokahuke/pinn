@@ -233,6 +233,19 @@ better than any one of them alone.
 6. the two wall samplers each gain `etahat`, since both conditions hold at
    every `etahat`.
 
+**What the code actually imposes (recorded 2026-08-09).** `sample.py` relaxes
+steps 3-4 to the determinant alone, `det T <= det T*` — the part of the
+six-copy cap that is provable and relabel-invariant — with det *placed*
+exactly between floor and ceiling rather than floored per-coordinate
+afterwards (the additive tau floor lifted lopsided states back over the
+ceiling and made the module's self-check flaky). States between the det bound
+and the matrix ellipse are sampled even though the containment argument calls
+them unreachable: extra coverage, not error. The ceiling is additionally
+capped at a static `DET_MAX = 1e3` as `etahat -> 0` (just above the static
+law's reach): left to diverge as `1/etahat^2` it filled 17% of the cloud with
+precision decades the static problem never visits, miscalibrating
+`feature_scale` ~1000x on the raw tau features.
+
 ## 7. The envelope
 
 ### What it is and why the current one breaks
@@ -404,10 +417,13 @@ It does not, because the ceiling bounds it:
 
     etahat^2 det T  <=  etahat^2 det T*  =  1 / (2 sqrt3)  =  0.2887
 
-exactly, and independent of `etahat`. Graded in premium units the erosion's
-coefficient is at most `0.537 etahat`, which is the same shape as
-two_arm_drift's `etahat/2` — a factor of a few at deployment, which that
-problem lives with.
+exactly, and independent of `etahat`. (Premium-units grading is RETRACTED as
+of 2026-08-10 — the residual is graded in the equation's own units, never
+scaled; see three_arm.md section 14 and learnings section 3. The bound above
+is a statement about the equation and stands either way.) In those units the
+erosion's coefficient is at most `0.537 etahat`, which is the same shape as
+two_arm_drift's `etahat/2` — a factor of a few in the high-drift decades,
+which that problem lives with.
 
 The failure-mode enumeration of `three_arm.md` section 14.4 is unchanged. The
 commit value does not depend on precision, so the erosion acts on the premium
@@ -485,9 +501,10 @@ OPEN:
 11. **Does one drift feature suffice?** The erosion depends on the *shape* of
     the precision matrix in a way no single number sees. Measure before adding
     a second.
-12. **Deployment `etahat`.** Per arm it is the contrast number divided by
-    `sqrt2`, so around 7.5 where two_arm's is 10.7 for the same underlying
-    drift. The sampler's scale is a guess until the real number is settled.
+12. **The working `etahat`.** Per arm it is two_arm's contrast number divided
+    by `sqrt2` for the same underlying drift (doc section 0). The sampler's
+    scale is a guess until the real number is settled -- which lives outside
+    the repo, like every deployment value.
 13. **The arena is the only referee, and it is not built.** A drift-aware
     three-arm zoo must wander all three arms; it cannot be copied from
     `arena/two_arm_drift.py`, which wanders only the treatment. That is a legal

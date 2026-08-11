@@ -261,7 +261,7 @@ def simulate(policy) -> Tensor:
     "--in",
     "in_path",
     type=click.Path(exists=True, path_type=Path),
-    default=Path("data") / "value_3a_64:64:64.pt",
+    default=Path("data") / "three_arm.pt",
     help="Checkpoint to benchmark.",
 )
 def main(in_path: Path) -> None:

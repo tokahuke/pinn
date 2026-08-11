@@ -28,7 +28,7 @@ class ExplorationPremium(nn.Module):
         u = exp(log_scale) * nu(-muhat, tauhat**(-1/2)) * y / (1 + y),
         y = relu(response)**2
 
-    nu(-muhat, sd) is the proven upper bound on the premium (docs/three_arm.md
+    nu(-muhat, sd) is the proven upper bound on the premium (kb/three_arm.md
     section 13, specialized to one challenger); the original tauhat**(-1/2)
     envelope is exactly its ridge slice, nu(0, sd) = sd / sqrt(2 pi), so this
     upgrade adds the muhat decay the old envelope lacked. The response head is
@@ -109,6 +109,7 @@ class ExplorationPremium(nn.Module):
         # Pre-calibration checkpoints trained with no feature scaling, which
         # is exactly a scale of ones.
         state_dict.setdefault(prefix + "feature_scale", torch.ones(FEATURE_COUNT))
+
         super()._load_from_state_dict(state_dict, prefix, *rest)
 
     def _features(self, muhat: Tensor, tauhat: Tensor) -> Tensor:
@@ -166,7 +167,7 @@ class DimensionlessValueFunction(nn.Module):
 
             L_ab[g] = g_s + (1/2) g_zz + (z/2) g_z - (1/2) g
 
-        is O(1)-conditioned at every information level (docs/two_arm.md
+        is O(1)-conditioned at every information level (kb/two_arm.md
         section 8): the equation reads e^s (z + g) = max over alpha of
         alpha e^s z + alpha(1-alpha) L_ab[g]. Returns the left side, the
         maximization, and L_ab itself -- all graph-connected to the premium's

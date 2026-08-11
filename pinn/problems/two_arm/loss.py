@@ -14,12 +14,23 @@ from .model import DimensionlessValueFunction
 from .sample import sample_ridge, sample_sobol
 from .simplex import maximize_quadratic
 
-RIDGE_WEIGHT = 10.0
-POWER = 2.0
+# Dead-solution floor: u = 0 scores pde exactly 0 and ridge exactly 0.25, so
+# 100 * pde / 0.25 leaves the dead branch 100x worse. Set at pde 48.5; the pde
+# is now 2.5e-4, so this stands ~200,000x above its own criterion and the ridge
+# is ~24% of what best-checkpointing selects on. It holds the ridge at ~4e-9
+# and trains smoothly, so it is left alone -- but re-derive it before trusting
+# the number.
+RIDGE_WEIGHT = 2.0e4
 
-# The champion was trained by escalating this ABOVE 6e0; retraining here will
-# not reproduce it.
-POSITIVITY_WEIGHT = 6.0e-2
+# Plain mean-of-squares. P = 2 compensated for the chart weight's suppressed
+# tail; in natural units it over-corrects, dropping the effective sample size
+# at batch 4096 to 2.1 points on three_arm (54 at P = 1).
+POWER = 1.0
+
+# Zero on the dead solution, so the floor above says nothing about it; a
+# multiple of pde instead, which the units change leaves alone. This net has
+# had no violations since the natural-units retrain, so the term is inert.
+POSITIVITY_WEIGHT = 6.5e2
 
 
 def pde_loss(
@@ -27,7 +38,7 @@ def pde_loss(
 ) -> tuple[Tensor, Tensor]:
     """
     Returns TWO numbers. The first is the squared residual of the HJB in
-    similarity coordinates (docs/two_arm.md
+    similarity coordinates (kb/two_arm.md
     section 8), maximization kept explicit. With z = muhat sqrt(tauhat),
     s = log tauhat, g = sqrt(tauhat) u, and the O(1) operator
 
@@ -56,16 +67,13 @@ def pde_loss(
     # model: one chain serves training and policy readout.
     lhs, best, l_ab = value.hamiltonian(muhat, tauhat)
 
-    # No relative scale: the raw-coordinate loss needed one because its
-    # coefficients spanned nine decades, but this equation self-normalizes
-    # (g is architecturally bounded by nu(-z, 1), the operator coefficients
-    # are O(1), the dead region is exactly zero), so the plain residual is
-    # already fair across the domain. Power-mean attention as in three_arm:
-    # the p-mean's gradient weights each point by (g / M_p)^(P-1), size
-    # relative to the batch's own population, annealing back to the plain
-    # mean as the tail thins; P = 1 recovers mean-of-squares exactly.
-    # Normalized by the detached batch mean so pow(P) sees O(1) numbers.
-    graded = (lhs - best.value).pow(2)
+    # NATURAL UNITS, NEVER SCALED. The chart multiplies the equation by
+    # tauhat**(3/2) (the identity __main__ asserts), so grading its residual
+    # squared applied an undeclared tauhat**3 weight (learnings section 3).
+    # The positivity term is NOT divided by it: that rule governs the RESIDUAL,
+    # and a sign condition's depth weighting is a free choice.
+    natural = tauhat.pow(1.5)
+    graded = ((lhs - best.value) / natural).pow(2)
     scale = graded.mean().detach().clamp_min(1e-30)
 
     return (
@@ -110,17 +118,34 @@ def loss(
     return pde + RIDGE_WEIGHT * ridge + POSITIVITY_WEIGHT * pos_learning
 
 
-def objective(batch: int = 1024) -> Objective:
+def draw(batch: int, device: str = "cpu") -> tuple:
+    """
+    One step's collocation tensors, in loss()'s argument order.
+
+    Split out of objective so the graphed trainer can hold them as fixed
+    buffers: a captured cuda graph replays the same tensor addresses, so the
+    sampling has to live outside it.
+    """
+    return (
+        *(t.to(device) for t in sample_sobol(batch)),
+        sample_ridge(batch // 4).to(device),
+    )
+
+
+def objective(batch: int = 1024, device: str = "cpu") -> Objective:
     """
     The problem packaged for the generic trainer: fresh Sobol + ridge draws,
     scored by loss.
+
+    `device` is the ONE place the trainer's device enters the problem. Sobol
+    draws on CPU (SobolEngine ignores the default device) and the batch moves
+    once; everything downstream inherits from its inputs, so no loss, model or
+    sampler needs to know a device exists. Defaults to CPU, which is what the
+    arena, probes and every module self-check rely on.
     """
 
     def step(value: DimensionlessValueFunction, iteration: int | None) -> Tensor:
-        muhat, tauhat = sample_sobol(batch)
-        ridge_tauhat = sample_ridge(batch // 4)
-
-        return loss(value, muhat, tauhat, ridge_tauhat, iteration)
+        return loss(value, *draw(batch, device), iteration)
 
     return step
 

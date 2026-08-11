@@ -20,7 +20,7 @@ from ..problems.three_arm import DimensionlessValueFunction, ValueFunction
 from ..utils.gaussian import _bivariate_ndtr
 from .harness import Params, Policy, Runner, optimal_deadline
 
-CHECKPOINT = Path("data") / "value_3a_64:64:64.pt"
+CHECKPOINT = Path("data") / "three_arm.pt"
 
 # The weakest prior the three-arm champion supports, in the dimensionless
 # units of its chart; the symmetric-point probes are clean from tauhat ~ 0.03

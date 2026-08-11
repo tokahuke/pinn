@@ -1,5 +1,5 @@
 """
-Two-armed allocation with a drifting mean. Maths in docs/two_arm_drift.md.
+Two-armed allocation with a drifting mean. Maths in kb/two_arm_drift.md.
 
 Layout mirrors two_arm: sample.py (collocation draws, plus the etahat law),
 envelope.py (the discounted perfect-information bound, closed form),
@@ -13,7 +13,7 @@ reproduces itself bitwise on that slice.
 """
 
 from .envelope import envelope
-from .loss import loss, objective, pde_loss, ridge_loss
+from .loss import draw, loss, objective, pde_loss, ridge_loss
 from .model import (
     DimensionlessValueFunction,
     init_model,

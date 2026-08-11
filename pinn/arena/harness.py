@@ -141,12 +141,6 @@ class Runner:
     def normal(self, mean: float, deviation: float) -> float:
         return float(torch.randn((), generator=self.rng)) * deviation + mean
 
-    def discounted_tail(self, start: int, per_epoch: float) -> float:
-        """
-        Sum of per_epoch * rho**t over t in [start, horizon).
-        """
-        return per_epoch * (self.rho**start - self.rho**self.horizon) / (1.0 - self.rho)
-
     def run(self, problem, policy: Policy, deltas: Tensor) -> Run:
         """
         Play `policy` against the environment for the full horizon.

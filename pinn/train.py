@@ -10,22 +10,11 @@ import torch
 import torch.nn as nn
 
 from collections.abc import Callable, Iterator
+from dataclasses import fields, is_dataclass
 from torch import Tensor
 
 type LearningRate = float | Iterator[float]
 type Objective = Callable[[nn.Module, int | None], Tensor]
-
-
-def decay(initial: float, half_life: int) -> Iterator[float]:
-    """
-    Endless exponential decay: initial * 0.5 ** (step / half_life).
-    """
-    factor = 0.5 ** (1.0 / half_life)
-
-    while True:
-        yield initial
-
-        initial *= factor
 
 
 def train(
@@ -36,7 +25,7 @@ def train(
 ) -> Iterator[float]:
     """
     Adam on objective(model, iteration), yielding the loss after each step.
-    lr is a constant or a generator of per-step rates (see decay); a finite
+    lr is a constant or a generator of per-step rates; a finite
     generator ends the training when it runs out, otherwise endless and the
     consumer decides when to stop (itertools.islice is your friend).
     """
@@ -61,3 +50,132 @@ def train(
         optimizer.step()
 
         yield objective_value.item()
+
+
+def leaves(structure: object) -> Iterator[Tensor]:
+    """
+    Every tensor in a structure of tensors, dataclasses and sequences, in a
+    stable order.
+
+    Problems hand their loss whatever shape suits them -- two_arm_drift five
+    bare tensors, the three-arm pair a Sample and two RidgeSamples. Walking
+    the structure is what lets one graphed trainer serve all of them without
+    a single loss signature changing.
+    """
+    if isinstance(structure, Tensor):
+        yield structure
+    elif is_dataclass(structure) is True:
+        for field in fields(structure):
+            yield from leaves(getattr(structure, field.name))
+    elif isinstance(structure, (tuple, list)):
+        for item in structure:
+            yield from leaves(item)
+
+
+def clone(structure: object) -> object:
+    """The same structure with every tensor cloned."""
+    if isinstance(structure, Tensor):
+        return structure.clone()
+
+    if is_dataclass(structure) is True:
+        return type(structure)(
+            *(clone(getattr(structure, field.name)) for field in fields(structure))
+        )
+
+    if isinstance(structure, (tuple, list)):
+        return type(structure)(clone(item) for item in structure)
+
+    return structure
+
+
+def train_graphed(
+    model: nn.Module,
+    draw: Callable[[], tuple],
+    score: Callable[..., Tensor],
+    lr: float = 1e-3,
+    refresh: int = 100,
+) -> Iterator[float]:
+    """
+    train(), but the step is captured as a cuda graph and replayed.
+
+    The step is dispatch-bound, not compute-bound -- measured 2026-08-11, a
+    three_arm step issues 47k aten calls and the gpu idles at 24%. Capture
+    turns those into one submission: 10x on an RTX 4090, and it survives
+    create_graph, which torch.compile explicitly does not.
+
+    Replay reruns the same tensor ADDRESSES, so the collocation cloud is a set
+    of fixed buffers refreshed every `refresh` steps rather than resampled
+    every step. That refresh doubles as the diagnostic step: it runs eagerly,
+    which is the only way the loss can print its breakdown, since a replay is
+    silent.
+    """
+    static = clone(draw())
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, capturable=True)
+
+    # Warmup on a side stream, or capture fails outright.
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+
+    with torch.cuda.stream(stream):
+        for _ in range(3):
+            optimizer.zero_grad(set_to_none=False)
+            score(model, *static, None).backward()
+            optimizer.step()
+
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+
+    # zero_grad INSIDE the capture: backward accumulates, so without it every
+    # replay would add to the previous replay's gradient.
+    with torch.cuda.graph(graph):
+        optimizer.zero_grad(set_to_none=False)
+        captured = score(model, *static, None)
+        captured.backward()
+        optimizer.step()
+
+    for iteration in itertools.count():
+        if iteration % refresh == 0:
+            for buffer, fresh in zip(leaves(static), leaves(draw())):
+                buffer.copy_(fresh)
+
+            optimizer.zero_grad(set_to_none=False)
+            eager = score(model, *static, iteration)
+            eager.backward()
+            optimizer.step()
+
+            yield eager.item()
+            continue
+
+        graph.replay()
+
+        yield captured.item()
+
+
+if __name__ == "__main__":
+    from dataclasses import dataclass
+
+    @dataclass
+    class _Pair:
+        left: Tensor
+        right: Tensor
+
+    nested = (torch.ones(3), _Pair(torch.ones(2), torch.ones(4)), [torch.ones(5)])
+    found = list(leaves(nested))
+
+    # Order is what makes the copy_ zip in train_graphed correct: buffers and
+    # fresh draws must line up leaf for leaf.
+    assert [tensor.numel() for tensor in found] == [3, 2, 4, 5]
+
+    copied = clone(nested)
+
+    assert [tensor.numel() for tensor in leaves(copied)] == [3, 2, 4, 5]
+    assert type(copied[1]) is _Pair and type(copied[2]) is list
+    assert all(a is not b for a, b in zip(leaves(nested), leaves(copied)))
+    assert all(torch.equal(a, b) for a, b in zip(leaves(nested), leaves(copied)))
+
+    # A clone must not alias: writing through one may not touch the other.
+    for tensor in leaves(copied):
+        tensor.zero_()
+
+    assert all(tensor.abs().sum() > 0 for tensor in leaves(nested))
+    print("ok")

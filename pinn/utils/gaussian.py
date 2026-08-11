@@ -26,6 +26,23 @@ _WEIGHTS = 0.5 * _WEIGHTS
 # |rho| <= 1 - 1e-3, below which 1 - rho has lost all but a digit of precision.
 _RHO_MAX = 1.0 - 1e-6
 
+# The rule lives in numpy, so converting it per call is a host-to-device copy
+# inside the autograd graph: 13% of a three_arm step on mps, measured
+# 2026-08-11. Cache per (dtype, device); there are never more than a few.
+_RULE: dict[tuple[torch.dtype, torch.device], tuple[Tensor, Tensor]] = {}
+
+
+def _quadrature(like: Tensor) -> tuple[Tensor, Tensor]:
+    key = (like.dtype, like.device)
+
+    if key not in _RULE:
+        _RULE[key] = (
+            torch.as_tensor(_NODES, dtype=like.dtype, device=like.device),
+            torch.as_tensor(_WEIGHTS, dtype=like.dtype, device=like.device),
+        )
+
+    return _RULE[key]
+
 
 def _normal_pdf(x: Tensor) -> Tensor:
     return torch.exp(-0.5 * x**2) / SQRT_2PI
@@ -44,8 +61,7 @@ def _bivariate_ndtr(h: Tensor, k: Tensor, rho: Tensor) -> Tensor:
     overflowing, and cos(t)**2 stays bounded away from 0 by the rho clamp.
     """
     h, k, rho = torch.broadcast_tensors(h, k, rho)
-    nodes = torch.as_tensor(_NODES, dtype=h.dtype, device=h.device)
-    weights = torch.as_tensor(_WEIGHTS, dtype=h.dtype, device=h.device)
+    nodes, weights = _quadrature(h)
 
     top = torch.asin(rho.clamp(-_RHO_MAX, _RHO_MAX))
     theta = top[..., None] * nodes
@@ -69,7 +85,7 @@ def nu(mean: Tensor, stddev: Tensor) -> Tensor:
         nu = mean * Phi(mean/stddev) + stddev * phi(mean/stddev)
 
     with Phi, phi the standard normal cdf and density. The building block of
-    the free-information premium envelopes (docs/three_arm.md section 13).
+    the free-information premium envelopes (kb/three_arm.md section 13).
     Limits: 0 as mean -> -inf, stddev/sqrt(2 pi) at mean = 0, mean as
     mean -> +inf.
     """
@@ -106,7 +122,7 @@ def nu2(
              + stddev_b mean_c (stddev_b - rho stddev_c))
             / (stddev_b stddev_c a root).
 
-    The three-arm free-information envelope (docs/three_arm.md section 13). Limits:
+    The three-arm free-information envelope (kb/three_arm.md section 13). Limits:
     nu(mean_b, stddev_b) as mean_c -> -inf, and max(nu_b, nu_c) <= nu2 <=
     nu_b + nu_c. rho is clamped to +-(1 - 1e-6) inside; see _RHO_MAX.
     """

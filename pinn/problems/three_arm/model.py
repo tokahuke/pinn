@@ -267,7 +267,7 @@ class DimensionlessValueFunction(nn.Module):
 
     def hamiltonian(
         self, m_b: Tensor, m_c: Tensor, tau_bb: Tensor, tau_bc: Tensor, tau_cc: Tensor
-    ) -> tuple[Tensor, Maximum]:
+    ) -> tuple[Tensor, Maximum, tuple[Tensor, Tensor, Tensor]]:
         """
         The HJB's two sides on wedge states: the value v and the maximized
         Hamiltonian (doc section 10). Pairwise learning numbers: for pair
@@ -278,6 +278,10 @@ class DimensionlessValueFunction(nn.Module):
         triangle-quadratic coefficients. Everything is graph-connected to the
         premium's parameters, so pde_loss grades v - best.value and policy
         reads the argmax off the same derivation.
+
+        Returns the learning numbers (l_ab, l_ac, l_bc) as well: they carry
+        the Hamiltonian's Hessian, and the loss grades its concavity along
+        sampled contrast directions (pde_loss).
         """
         m_b = m_b.detach().requires_grad_(True)
         m_c = m_c.detach().requires_grad_(True)
@@ -319,8 +323,12 @@ class DimensionlessValueFunction(nn.Module):
             v_tbb + v_tcc - v_tbc
         )
 
-        return v, maximize_quadratic(
-            -l_ab, -l_ac, l_bc - l_ab - l_ac, m_b + l_ab, m_c + l_ac
+        return (
+            v,
+            maximize_quadratic(
+                -l_ab, -l_ac, l_bc - l_ab - l_ac, m_b + l_ab, m_c + l_ac
+            ),
+            (l_ab, l_ac, l_bc),
         )
 
     def policy(
@@ -331,7 +339,7 @@ class DimensionlessValueFunction(nn.Module):
         (alpha_a, alpha_b, alpha_c). Wedge states only, like forward;
         ValueFunction.policy handles fold and physical arm labels.
         """
-        _, best = self.hamiltonian(m_b, m_c, tau_bb, tau_bc, tau_cc)
+        _, best, _ = self.hamiltonian(m_b, m_c, tau_bb, tau_bc, tau_cc)
 
         return torch.stack([1.0 - best.x - best.y, best.x, best.y], dim=-1).detach()
 
@@ -415,13 +423,21 @@ def init_model(
     business knowing where checkpoints live, and passing the dict keeps
     `pinn init --from` the only place that decides what a source file means.
     """
-    if (state is None) == (topology is None):
-        raise ValueError("pass exactly one of state, topology")
+    if state is None and topology is None:
+        raise ValueError("pass at least one of state, topology")
 
     if topology is not None:
         hidden, kinks = parse_topology(topology)
+        value = DimensionlessValueFunction(ExplorationPremium(hidden, kinks=kinks))
 
-        return DimensionlessValueFunction(ExplorationPremium(hidden, kinks=kinks))
+        # Both: topology is the TARGET shape, state the source adapted into
+        # it -- how a kink branch is grafted onto a trained smooth net
+        # (_load_from_state_dict defaults the missing kink keys to their
+        # zero-output init, so the graft is bit-exact at step 0).
+        if state is not None:
+            value.load_state_dict(state)
+
+        return value
 
     hidden = hidden_widths(state)
     kinks = (

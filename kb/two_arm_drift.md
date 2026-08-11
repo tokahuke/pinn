@@ -343,9 +343,11 @@ Everything two_arm does carries over except the response's zero set:
   the clipped mass lands ON the ceiling, which is the attractor. `etahat` gets
   tauhat's own shape -- decade-spread scale times an exponential tail, reaching
   0 (the two_arm anchor) and capped where the ceiling would collapse onto the
-  precision floor. The scale is set by deployment, not taste: a drift of 3% of
-  baseline over one discount horizon is `etahat ~ 10.7`, which is why an
-  earlier law centred on 0.1 covered nothing that matters.
+  precision floor. The scale is set by the physics, not taste: `etahat/2` is
+  the truth's wander over one discount time against the best measurement of
+  it, so any world whose winner can change within the horizon has `etahat` in
+  the tens -- which is why an earlier law centred on 0.1 covered nothing that
+  matters.
 
 ## 9. Verification
 

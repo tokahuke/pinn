@@ -1,5 +1,5 @@
 """
-The three-arm drift problem's premium cap (docs/three_arm_drift.md section 7).
+The three-arm drift problem's premium cap (kb/three_arm_drift.md section 7).
 """
 
 from __future__ import annotations

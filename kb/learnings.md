@@ -121,22 +121,57 @@ the loss. A loss term negotiates; an architecture guarantees.
 
 ## 3. Grading: residual units are a law, derive them
 
-- **A relative-residual scale is a guessed scaling law.** `1 + |H|`-style
-  per-point normalizers estimate reactively what a similarity analysis
-  supplies exactly. Do the units analysis (self-similar coordinates): the
-  transformed equation has O(1) coefficients, the whole scale dependence
-  collects into known powers of the information scale, and the "variable
-  transformation" enters the code as ONE multiplicative weight (identity:
-  residual_transformed = S^p * residual_raw). The horrendous transformed
-  operators stay in the doc; code only reweights.
-- **Choose WHICH units knowingly — failure modes have their own S-powers.**
-  Grading in the equation's own units treats shape error fairly but let a
-  degenerate branch (residual one power of S smaller than the equation
-  scale) become invisible at small S: a dead-Hamiltonian net scored WELL.
-  Grading one power lower (value/premium units) keeps degeneracies loud at
-  every scale. Rule: enumerate the failure modes' residual scalings before
-  choosing the weight's exponent; the right units are the ones where the
-  WORST failure is O(1) everywhere.
+- **NEVER scale the PDE residual. Grade it in the equation's own units, in
+  any shape or form, ever.** (2026-08-10, reversing this section's earlier
+  advice — which is preserved below as the mistake it was, because it is
+  seductive and was believed here for months.) The equation as written,
+  `rho V = max{...}`, is the only form whose residual has a physical
+  meaning: it is an error in VALUE, and it is the quantity the comparison
+  principle bounds, `||V - V*|| <= ||residual|| / rho`. Multiply it by
+  anything state-dependent and you are weighting the domain — deciding
+  where the net is allowed to be wrong — while believing you are choosing
+  units.
+- **A similarity chart is a derivation tool, not a grading tool.** It earns
+  its keep by conditioning the autograd chain (cancelling the coefficient
+  spread algebraically so no derivative term is multiplied by a large
+  number). Keep it for that. But the identity it produces,
+  `residual_transformed = S^p * residual_raw`, means grading the transformed
+  residual SQUARED applies a silent `S^(2p)` weight. Keep that identity as a
+  CHECK (a self-check asserting it), and divide it back out before grading.
+- **The measurement, so nobody re-derives this the hard way.** two_arm_drift,
+  2026-08-10: the chart weight was `tauhat^3`, ~15 decades across the
+  sampled range. It sent 70% of the p-mean's gradient to the near-static
+  corner — where the natural error is ~1e-6 relative and 78% of the
+  collocation points are dead — and 5% to every drifting regime combined.
+  The absolute residual looked beautifully FLAT across decades, which is
+  what a chart weight cancelling the true error's growth looks like. A loss
+  that appears balanced under a weight is balanced in the weight's
+  coordinates, not in the problem.
+- **THE MISTAKE (kept deliberately): "choose WHICH units knowingly".** The
+  old reasoning ran: grading in the equation's own units lets a degenerate
+  branch whose residual is one power of `S` smaller become invisible at
+  small `S` (a dead-Hamiltonian net scored WELL, 2026-08-05), so grade one
+  power lower, in premium units, to keep the degeneracy loud. It is a real
+  failure mode and the fix is wrong. A degeneracy is broken by a term that
+  provably breaks it — the ridge condition, the tie losses — not by a thumb
+  on the residual that also reweights every non-degenerate point in the
+  domain. If the dead branch scores well, strengthen the breaker.
+- **Removing a residual weight detonates every other weight.** The pde term
+  changes magnitude by orders (measured: x8e7 two_arm, x1.6e8 two_arm_drift,
+  x1.2e3 three_arm, x2.7e4 three_arm_drift), so every constant calibrated
+  against it — boundary conditions, degeneracy breakers, sign penalties — is
+  instantly negligible. Rescale them by the measured pde factor to hold the
+  balance the record was tuned at, and expect to recheck once the retrained
+  net's error distribution settles. Auxiliary weights carry the factor; the
+  residual never does.
+- **A PARAMETER is not a STATE, and pooling lets family members compete.**
+  When a net solves a family of problems (a parameter as a net input, here
+  `etahat`), one pooled residual loss lets the member with the largest raw
+  numbers take the gradient. Natural units fixes the SCALE half of that.
+  It does not fix the POPULATION half: a family member that is 3% of the
+  batch with a light residual tail stays starved no matter the weighting,
+  and that needs stratified sampling of the parameter. Diagnose the two
+  separately — measure attention share against population share per slice.
 - **Keep the parameter-free seatbelt.** log-cosh costs nothing, has no
   knobs, and caps each point's gradient during the violent transients that
   demonstrably happen (wall slams). Parsimony bites knobs, not seatbelts.
@@ -223,6 +258,23 @@ bucketed by the suspected cause.
 
 ## 7. The fat tail: attention is a loss-space instrument (2026-08-06)
 
+- **AMENDED 2026-08-10: attention and units are the same knob, so tune one
+  at a time.** The p-mean below was calibrated against a chart-WEIGHTED
+  residual, which suppressed the tail; the exponent was compensation. Grade
+  in natural units (section 3) and the compensation becomes over-correction:
+  measured on the same batch of 4096, `POWER = 2` left an effective sample
+  size of 2.1 points on three_arm and 4.9 on three_arm_drift — a gradient
+  decided by a handful of points, which also broke the S3-invariance
+  self-check by making it precision-bound. `POWER = 1` (plain
+  mean-of-squares) restores 54 and 36. Whenever the residual's units change,
+  RE-MEASURE the effective sample size `1 / sum(w_i^2)` before trusting any
+  attention exponent; and prefer relative tolerances in invariance checks,
+  since an absolute one is calibrated to a loss magnitude that just moved.
+- **A tail-dominated loss is the CORRECT state once units are natural.** The
+  error really is orders larger at low information; that is the signal, not
+  a pathology to be normalized away. The cost is that batch size now buys
+  gradient quality directly — matching the old absolute effective sample
+  size wanted ~20k points, 5x the step cost.
 - **Histogram the residual population before touching anything.** A stalled
   loss has a shape: point mass at zero (architecturally-exact regions) +
   Gaussian bulk + a flat one-sided shelf at 5-6 sd (kurtosis ~10 vs the

@@ -10,7 +10,7 @@ import torch
 from torch import Tensor
 from torch.quasirandom import SobolEngine
 
-from ...utils import decade_scale, exponential
+from ...utils import decade_scale, exponential, truncated_pareto
 
 # tauhat law: two_arm's, scaled by the ceiling 1/(2 etahat) and clipped there.
 # dtauhat/dt = rho[design - etahat^2 tauhat^2], design <= 1/4, so the ceiling
@@ -18,14 +18,19 @@ from ...utils import decade_scale, exponential
 PRIOR_FLOOR = 1e-3
 SCALE_DECADES = 3.0
 
-# etahat law: tauhat's shape, reaching 0 (the two_arm anchor). etahat/2 is the
-# truth's wander over one discount time divided by the best measurement of it,
-# so deployment sits near 10, not 0.1; decades because nothing pins it tighter.
-ETAHAT_SCALE = 20.0
-ETAHAT_DECADES = 4.0
-
-# Past this the ceiling 1/(2 etahat) nears PRIOR_FLOOR and tauhat degenerates.
+# etahat law: log-uniform plus an atom at the two_arm anchor. etahat/2 is the
+# truth's wander per discount time over the best measurement of it, so any
+# world whose winner can change within the horizon sits decades above 0.1.
+# ONE Sobol coordinate, monotone, so every batch carries the same composition:
+# this family's per-band gradients are near-antiparallel and cancel ~96%, so a
+# fluctuating composition left the surviving direction to chance (batch-to-batch
+# gradient cosine 0.26 under the old two-coordinate law, 0.94 under this).
+ETAHAT_MIN = 1.0e-3
 ETAHAT_MAX = 50.0
+
+# The static problem is a family member, not a limit point: a stated share at
+# exactly 0, the slice that is provably two_arm.
+ANCHOR_SHARE = 0.05
 
 # The ceiling diverges as etahat -> 0, so the coupled law needs its own bound.
 TAUHAT_MAX = 50.0
@@ -48,13 +53,18 @@ def _tauhat(u_scale: Tensor, u_tail: Tensor, etahat: Tensor) -> Tensor:
     return drawn.clamp_min(PRIOR_FLOOR)
 
 
-def _etahat(u_scale: Tensor, u_tail: Tensor) -> Tensor:
+def _etahat(u: Tensor) -> Tensor:
     """
-    Decade-spread scale times an Exp tail, tauhat's shape at ETAHAT_SCALE.
-    """
-    drawn = ETAHAT_SCALE * decade_scale(u_scale, ETAHAT_DECADES) * exponential(u_tail)
+    Log-uniform between the bounds with an atom at 0, from ONE coordinate.
 
-    return drawn.clamp(max=ETAHAT_MAX)
+    Monotone in u, which is the point: a Sobol coordinate is near-uniform on
+    [0, 1) within any batch, so a monotone map hands every batch the same
+    etahat composition. No weights, no bins, no importance correction.
+    """
+    live = ((u - ANCHOR_SHARE) / (1.0 - ANCHOR_SHARE)).clamp_min(0.0)
+    drawn = truncated_pareto(live, ETAHAT_MIN, ETAHAT_MAX)
+
+    return torch.where(u < ANCHOR_SHARE, torch.zeros_like(u), drawn)
 
 
 def sample_sobol(n: int) -> tuple[Tensor, Tensor, Tensor]:
@@ -66,7 +76,7 @@ def sample_sobol(n: int) -> tuple[Tensor, Tensor, Tensor]:
     sequence, so coverage keeps refining across iterations.
     """
     t = _SOBOL.draw(n).clamp(1e-7, 1.0 - 1e-7)
-    etahat = _etahat(t[:, 3], t[:, 4])
+    etahat = _etahat(t[:, 3])
     tauhat = _tauhat(t[:, 0], t[:, 1], etahat)
     muhat = (2.0 / tauhat.sqrt()) * exponential(t[:, 2])
 
@@ -78,7 +88,7 @@ def sample_ridge(n: int) -> tuple[Tensor, Tensor]:
     Ridge points (muhat = 0 implied): tauhat and etahat from the same laws.
     BC1 holds at every etahat, so the drift coordinate is sampled here too.
     """
-    etahat = _etahat(torch.rand(n), torch.rand(n))
+    etahat = _etahat(torch.rand(n))
 
     return _tauhat(torch.rand(n), torch.rand(n), etahat), etahat
 
@@ -115,10 +125,31 @@ if __name__ == "__main__":
         assert (ratio > 0.99).float().mean().item() > 0.06, name
         assert ((ratio > 0.3) & (ratio < 0.99)).float().mean().item() > 0.12, name
 
-    # Deployment (etahat ~ 10.7) and the two_arm anchor both carry real mass.
-    assert (etahat < 0.01).float().mean().item() > 0.08
-    assert ((etahat > 3.0) & (etahat < 30.0)).float().mean().item() > 0.2
-    assert (etahat > 10.67).float().mean().item() > 0.1
-    assert etahat.min().item() < 1e-4
+    # The law's stated shares, log-uniform over 4.7 decades plus the anchor
+    # atom: P(< 0.01) = 0.25, P(3 < e < 30) = 0.20, P(> 10) = 0.14 analytically.
+    assert abs((etahat == 0.0).float().mean().item() - ANCHOR_SHARE) < 0.01
+    assert (etahat < 0.01).float().mean().item() > 0.20
+    assert ((etahat > 3.0) & (etahat < 30.0)).float().mean().item() > 0.17
+    assert (etahat > 10.0).float().mean().item() > 0.11
+    assert etahat.max().item() <= ETAHAT_MAX
+
+    # No point mass welded to the top: the old law clamped 1.4% of every batch
+    # onto the cap, this one reaches it only in the limit.
+    assert (etahat > ETAHAT_MAX - 1e-3).float().mean().item() < 0.005
+
+    # The point of the law: monotone in one coordinate, so two independent
+    # batches carry the same etahat composition.
+    first = sample_sobol(4096)[2]
+    second = sample_sobol(4096)[2]
+    bands = [(0.0, 1e-3), (1e-3, 0.1), (0.1, 1.0), (1.0, 10.0), (10.0, 50.1)]
+    drift = max(
+        abs(
+            ((first >= lo) & (first < hi)).float().mean().item()
+            - ((second >= lo) & (second < hi)).float().mean().item()
+        )
+        for lo, hi in bands
+    )
+
+    assert drift < 0.02, drift
 
     print("ok")

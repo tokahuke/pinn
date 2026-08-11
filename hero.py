@@ -23,6 +23,10 @@ from pinn.problems.two_arm import (
     DimensionlessValueFunction as TwoArmDimensionless,
     ValueFunction as TwoArmValue,
 )
+from pinn.problems.two_arm_drift import (
+    DimensionlessValueFunction as DriftDimensionless,
+    ValueFunction as DriftValue,
+)
 
 ANCHORS = np.array(
     [
@@ -116,7 +120,7 @@ def simulate(value: ValueFunction) -> tuple[list, list]:
 
 def main() -> None:
     value = ValueFunction(
-        DimensionlessValueFunction.load("data/value_3a_64:64:64.pt"), rho=1.0, sigma=1.0
+        DimensionlessValueFunction.load("data/three_arm.pt"), rho=1.0, sigma=1.0
     )
     image = field(value)
     trails, arms = simulate(value)
@@ -299,6 +303,128 @@ def two_arm_hero() -> None:
     print("saved docs/hero2.png")
 
 
+def drift_hero() -> None:
+    """
+    The funnel of doubt with a wandering truth: same chart as two_arm_hero
+    (x accumulated precision, y belief, field the policy), but the world
+    drifts, so precision erodes at eta^2 tau^2. Exploring paths climb toward
+    the drift ceiling instead of running right forever; a committed path buys
+    nothing, slides LEFT as its knowledge rots, and the boundary re-opens it
+    -- no decision is final, and the picture shows the cycle.
+    """
+    etahat = 0.7
+    paths, horizon = 18, 8.0
+    birth_tau = 0.55
+    value = DriftValue(
+        DriftDimensionless.load("data/two_arm_drift.pt"),
+        rho=1.0,
+        sigma=1.0,
+        eta=etahat,
+    )
+
+    torch.manual_seed(3)
+    m = torch.zeros(paths)
+    tau = torch.full((paths,), birth_tau)
+    trails: list[list[tuple[float, float]]] = [[] for _ in range(paths)]
+
+    # A dot per committed EPISODE, placed where it began -- under drift a
+    # commit is an event on the way, not a fate: the slide left that follows
+    # is the commitment rotting until the boundary re-opens it. Episodes
+    # shorter than the debounce are wall chatter, not decisions.
+    debounce = int(0.4 / DT)
+    entry: list[tuple[float, float, int] | None] = [None] * paths
+    streak = [0] * paths
+    commits: list[tuple[float, float, int]] = []
+    t = 0.0
+
+    while t < horizon:
+        for i in range(paths):
+            trails[i].append((float(tau[i]), float(m[i])))
+
+        share = value.policy(m, tau)
+
+        for i in range(paths):
+            # Near-vertex counts as committed: the boundary chatters by
+            # epsilon while a path rides the wall, and exact-vertex tests
+            # would split one ride into confetti.
+            if float(share[i]) >= 0.995 or float(share[i]) <= 0.005:
+                if entry[i] is None:
+                    entry[i] = (float(tau[i]), float(m[i]), int(float(share[i]) >= 0.5))
+                    streak[i] = 0
+                streak[i] += 1
+            else:
+                if entry[i] is not None and streak[i] >= debounce:
+                    commits.append(entry[i])
+                entry[i] = None
+
+        rate = share * (1.0 - share)
+
+        # Belief dynamics under drift: same innovation as the static funnel,
+        # while precision gains the erosion. At a vertex rate = 0, so the mean
+        # freezes and the path slides left until the boundary re-opens it.
+        m = m + (rate.sqrt() / tau) * DT**0.5 * torch.randn(paths)
+        tau = (tau + (rate - etahat**2 * tau**2) * DT).clamp_min(0.05)
+        t += DT
+
+    commits.extend(
+        held for held, run in zip(entry, streak) if held is not None and run >= debounce
+    )
+    tau_max = 1.06 * max(point[0] for trail in trails for point in trail)
+    mu_max = 1.10 * max(abs(point[1]) for trail in trails for point in trail)
+    tau_left = 0.98 * min(point[0] for trail in trails for point in trail)
+
+    columns, rows = 760, 380
+    tau_axis = torch.linspace(tau_left, tau_max, columns)
+    mu_axis = torch.linspace(-mu_max, mu_max, rows)
+    mu_grid, tau_grid = torch.meshgrid(mu_axis, tau_axis, indexing="ij")
+    share_grid = value.policy(mu_grid.flatten(), tau_grid.flatten()).reshape(
+        rows, columns
+    )
+    image = (
+        share_grid.numpy()[..., None] * ANCHORS[1]
+        + (1.0 - share_grid.numpy())[..., None] * ANCHORS[0]
+    )
+
+    fig, ax = plt.subplots(figsize=(16, 8))
+    ax.imshow(
+        np.clip(image, 0, 1) ** 0.92,
+        origin="lower",
+        extent=[tau_left, tau_max, -mu_max, mu_max],
+        interpolation="bilinear",
+        aspect="auto",
+    )
+
+    for trail in trails:
+        if len(trail) < 3:
+            continue
+        _draw_trail(ax, trail)
+
+    for commit_tau, commit_m, arm in commits:
+        ax.plot(
+            commit_tau,
+            commit_m,
+            marker="o",
+            markersize=11,
+            color=DOT_COLORS[arm],
+            markeredgecolor="white",
+            markeredgewidth=1.1,
+            zorder=5,
+        )
+
+    ax.set_xlim(tau_left, tau_max)
+    ax.set_ylim(-mu_max, mu_max)
+    ax.axis("off")
+    fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
+
+    buffer = io.BytesIO()
+    fig.savefig(buffer, format="png", dpi=600, transparent=True)
+    plt.close(fig)
+    buffer.seek(0)
+    Image.open(buffer).resize((2400, 1200), Image.LANCZOS).save("docs/hero_drift.png")
+    print("saved docs/hero_drift.png")
+
+
 if __name__ == "__main__":
     main()
     two_arm_hero()
+    drift_hero()

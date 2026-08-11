@@ -1,5 +1,5 @@
 """
-Consistency checks (docs/two_arm.md section 6) for a trained checkpoint, plus an
+Consistency checks (kb/two_arm.md section 6) for a trained checkpoint, plus an
 off-grid residual audit. Reports numbers; judges nothing.
 """
 
@@ -25,7 +25,7 @@ from ..problems.two_arm import init_model, sample_sobol
 )
 def main(in_path: Path) -> None:
     """
-    The section 6 identities of docs/two_arm.md, on a two_arm checkpoint.
+    The section 6 identities of kb/two_arm.md, on a two_arm checkpoint.
     """
     value = init_model(state=torch.load(in_path))
 

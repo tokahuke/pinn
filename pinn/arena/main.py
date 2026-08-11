@@ -177,7 +177,9 @@ def analyze(runs: Path) -> None:
         wrong = [r for r in committed if r.delta[r.committed] < max(r.delta)]
         # committed_at, not epochs: the runner plays the full horizon now, so
         # epochs is the horizon for every run and says nothing about commitment.
-        epochs = sorted(r.committed_at for r in committed)
+        # Old studies predate the field; their runs read as None and are
+        # dropped from the median, like precision_time below.
+        epochs = sorted(r.committed_at for r in committed if r.committed_at is not None)
         median = epochs[len(epochs) // 2] if epochs else None
         # Old studies predate the field; they read as 0.
         info, info_ci = mean_ci([getattr(r, "precision_time", 0.0) for r in runs_])

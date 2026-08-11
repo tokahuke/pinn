@@ -5,6 +5,7 @@ losses of doc section 12, and the trainer-facing objective.
 
 from __future__ import annotations
 
+import math
 import torch
 import torch.nn as nn
 
@@ -14,50 +15,105 @@ from ...train import Objective
 from .model import DimensionlessValueFunction
 from .sample import RidgeSample, Sample
 
+# The ties are the ONLY terms breaking the never-explore degeneracy: on that
+# solution pde is exactly 0 and the control tie exactly 1.0, so the weight must
+# beat the live pde. At pde 1.3e-2 the 100x floor is 1.3; 10.0 clears it.
 TIE_WEIGHT = 10.0
-POWER = 2.0
+
+# Plain mean-of-squares. P = 2 compensated for the chart weight's suppressed
+# tail; in natural units it over-corrects, dropping the effective sample size
+# at batch 4096 to 2.1 points on three_arm (54 at P = 1).
+POWER = 1.0
+
+# Concavity: L[f] >= 0 for every contrast direction, provable at the answer and
+# invisible to the residual, so it moves the path and not the fixed point. Zero
+# on the dead solution, so the tie floor says nothing about it. Both constants
+# are on the post-saturation, post-natural-units scale and share nothing with
+# the pre-2026-08-10 record; the weight is calibrated on the MEDIAN pde over
+# seven draws, since a single draw put it at 730% of the equation.
+CONCAVITY_SCALE = 1.0e-3
+CONCAVITY_WEIGHT = 2.6e0
 
 
-def pde_loss(value: DimensionlessValueFunction, draw: Sample) -> Tensor:
+def directional_learning(
+    l_ab: Tensor, l_ac: Tensor, l_bc: Tensor, theta: Tensor
+) -> Tensor:
     """
-    Interior HJB residual in value form (doc sections 4, 7, 10), units
-    rho = sigma = 1, i.e. the dimensionless form (doc section 11):
+    The learning operator along the contrast direction at angle theta of the
+    (b, c) tangent chart: the Hamiltonian's negated Hessian as a quadratic
+    form, L[f] = f' M f with M = [[l_ab, h], [h, l_ac]],
+    h = (l_ab + l_ac - l_bc)/2. The pair directions are theta = 0 (l_ab),
+    pi/2 (l_ac), and 3pi/4 (l_bc / 2).
+
+    Linear in the learning numbers, so it is smooth everywhere and its
+    gradient scale does not depend on their magnitude -- the property the
+    eigenvalue form loses to its sqrt (whose tie set is the entire contact
+    set; the clamped version silently pays to un-flatten the dead region).
+    """
+    h = 0.5 * (l_ab + l_ac - l_bc)
+    along_b, along_c = torch.cos(theta), torch.sin(theta)
+
+    return l_ab * along_b**2 + l_ac * along_c**2 + 2.0 * h * along_b * along_c
+
+
+def pde_loss(value: DimensionlessValueFunction, draw: Sample) -> tuple[Tensor, Tensor]:
+    """
+    Returns TWO numbers. The first is the interior HJB residual in value form
+    (doc sections 4, 7, 10), units rho = sigma = 1, i.e. the dimensionless
+    form (doc section 11):
     v = max over the simplex of alpha.m + pairwise learning terms; graded in
-    similarity PREMIUM units (doc section 14 and its postscript).
+    the equation's OWN units, never scaled (see the standing rule below).
 
     KNOWN DEGENERATE on its own: the commit envelope v = max(0, m_b, m_c)
     zeroes this residual exactly (the never-explore solution), just as the
     two_arm residual was degenerate before BC1. The tie losses of doc
     section 12 break the degeneracy.
+
+    The second is the concavity term: mean of relu(-L[f]) along ONE freshly
+    sampled contrast direction per point. Concavity of the simplex quadratic
+    is L[f] >= 0 for EVERY direction f (derived 2026-08-08), provable at the
+    answer by the mean-preserving-spread argument, and pairwise positivity
+    alone misses ~3x of the violations (champion: 93.1% pairwise-positive,
+    78.5% concave). The direction is redrawn every step, so the population
+    loss vanishes exactly on concavity -- the same trick the collocation
+    cloud plays with space. LINEAR in the violation, not squared, for the
+    pos_learning reason: the policy reads the SIGN. Sampled on the wedge's
+    own chart; the zero set (concavity) is chart-invariant even though the
+    angular weighting is not. Zero on the never-explore solution -- all
+    three learning numbers vanish -- so it neither breaks nor deepens the
+    degeneracy.
     """
     # The derivation (learning numbers, Hamiltonian, simplex max) lives on
     # the model: one chain serves training and policy readout.
-    v, best = value.hamiltonian(
+    v, best, (l_ab, l_ac, l_bc) = value.hamiltonian(
         draw.m_b, draw.m_c, draw.tau_bb, draw.tau_bc, draw.tau_cc
     )
-    det = draw.tau_bb * draw.tau_cc - draw.tau_bc**2
+    theta = torch.rand_like(l_ab) * math.pi
+    violation = torch.relu(-directional_learning(l_ab, l_ac, l_bc, theta))
+    # SATURATED, as two_arm_drift's positivity term: relu is linear in depth,
+    # so one deep point dominates -- the worst carried 7x the whole term's
+    # mean. y / (s + y) is bounded per point, linear below s, 1/y^2 above; NOT
+    # tanh (float32 gradient underflows, CLAUDE.md traps). Zero set untouched.
+    # s sits just above the median violation, so lower it as the net converges.
+    concavity = (violation / (CONCAVITY_SCALE + violation)).mean()
 
-    # Similarity grading in PREMIUM units (doc section 14 postscript): one
-    # power of S below the equation's own units, so the never-explore mode
-    # (residual ~ u ~ S^(-1/2), one power smaller than the equation scale)
-    # stays loudly visible at every information level -- graded in equation
-    # units it fades like S and a dead-Hamiltonian net scores well (observed
-    # 2026-08-05). This weight is the analytic form of the old reactive
-    # 1 + |H - commit| scale. The denominator is the sum of the three
-    # pairwise precisions (the tau_bc terms telescope); S3-invariant.
-    weight = (det**0.75 / (draw.tau_bb + draw.tau_cc + draw.tau_bc)).detach()
-
-    # Power-mean attention: a plain mean starves the fat-tail subpopulation
-    # (the b/c-flux blob, a flat shelf at 5-6 sd) of gradient once the bulk
-    # converges. The p-mean's gradient weights each point by (g / M_p)^(P-1)
-    # -- size relative to the batch's own population, annealing back to the
-    # plain mean as the tail thins -- while staying a mean: same units, same
-    # magnitude, P = 1 recovers mean-of-squares exactly. Normalized by the
-    # detached batch mean so pow(P) sees O(1) numbers, not float32 dust.
-    graded = (weight * (v - best.value)).pow(2)
+    # NATURAL UNITS, NEVER SCALED. This once graded in similarity PREMIUM
+    # units, det**0.75 / (tau_bb + tau_cc + tau_bc), to keep the never-explore
+    # mode loud at low information. Gone: a chart-derived weight on the
+    # residual is an undeclared reweighting of the domain (learnings section
+    # 3). The degeneracy it defended is the tie losses' job; if a dead
+    # Hamiltonian scores well again, strengthen the breaker, not the thumb.
+    #
+    # Power-mean attention (learnings section 7); at POWER = 1 this is plain
+    # mean-of-squares. Normalized by the detached batch mean so pow(P) sees
+    # O(1) numbers, not float32 dust.
+    graded = (v - best.value).pow(2)
     scale = graded.mean().detach().clamp_min(1e-30)
 
-    return scale * (graded / scale).pow(POWER).mean().pow(1.0 / POWER)
+    return (
+        scale * (graded / scale).pow(POWER).mean().pow(1.0 / POWER),
+        concavity,
+    )
 
 
 def control_tie_loss(value: DimensionlessValueFunction, draw: RidgeSample) -> Tensor:
@@ -139,7 +195,7 @@ def loss(
     treatment_draw: RidgeSample,
     iteration: int | None = None,
 ) -> Tensor:
-    pde_residual = pde_loss(value, draw)
+    pde_residual, concavity = pde_loss(value, draw)
     control_residual = control_tie_loss(value, control_draw)
     treatment_residual = treatment_tie_loss(value, treatment_draw)
 
@@ -148,26 +204,54 @@ def loss(
             f"iter {iteration}: pde {pde_residual.item():.3e}"
             f"  control_tie {control_residual.item():.3e}"
             f"  treatment_tie {treatment_residual.item():.3e}"
+            f"  concavity {concavity.item():.3e}"
         )
 
-    return pde_residual + TIE_WEIGHT * (control_residual + treatment_residual)
+    return (
+        pde_residual
+        + TIE_WEIGHT * (control_residual + treatment_residual)
+        + CONCAVITY_WEIGHT * concavity
+    )
 
 
-def objective(batch: int = 1024) -> Objective:
+def on_device(state: Sample | RidgeSample, device: str):
+    """
+    A draw moved to the trainer's device, field by field. Dataclasses of
+    tensors, so the same reconstruct-from-vars trick the self-checks use for
+    cloning; field order is the constructor's.
+    """
+    return type(state)(*(field.to(device) for field in vars(state).values()))
+
+
+def draw(batch: int, device: str = "cpu") -> tuple:
+    """
+    One step's collocation samples, in loss()'s argument order: every training
+    state lives in the fundamental wedge.
+
+    Split out of objective so the graphed trainer can hold them as fixed
+    buffers: a captured cuda graph replays the same tensor addresses, so the
+    sampling has to live outside it.
+    """
+    return (
+        on_device(Sample.draw(batch).fold(), device),
+        on_device(RidgeSample.control_tie(batch // 4), device),
+        on_device(RidgeSample.treatment_tie(batch // 4), device),
+    )
+
+
+def objective(batch: int = 1024, device: str = "cpu") -> Objective:
     """
     The problem packaged for the generic trainer: fresh Sobol draws scored by
     loss.
+
+    `device` is the ONE place the trainer's device enters the problem. Sobol
+    draws on CPU (SobolEngine ignores the default device) and the batch moves
+    once; everything downstream inherits from its inputs. Defaults to CPU,
+    which is what the arena, probes and the module self-checks rely on.
     """
 
     def step(value: nn.Module, iteration: int | None) -> Tensor:
-        # The rollup: every training state lives in the fundamental wedge.
-        return loss(
-            value,
-            Sample.draw(batch).fold(),
-            RidgeSample.control_tie(batch // 4),
-            RidgeSample.treatment_tie(batch // 4),
-            iteration,
-        )
+        return loss(value, *draw(batch, device), iteration)
 
     return step
 
@@ -182,11 +266,40 @@ if __name__ == "__main__":
 
     # The commit envelope solves the interior PDE exactly (the documented
     # degeneracy), which doubles as an end-to-end test of the derivative ->
-    # L -> Hamiltonian pipeline: zero premium must give ~zero pde loss.
+    # L -> Hamiltonian pipeline: zero premium must give ~zero pde loss. The
+    # concavity term must be EXACTLY silent on it (all learning numbers are
+    # 0, relu(-0) contributes nothing): it cannot break or deepen the
+    # degeneracy, and there is no clamp residue to tolerate.
     zero = DimensionlessValueFunction(_ZeroPremium())
-    envelope_loss = pde_loss(zero, Sample.draw(2048))
+    envelope_loss, envelope_concavity = pde_loss(zero, Sample.draw(2048))
 
     assert envelope_loss.item() < 1e-8, envelope_loss.item()
+    assert envelope_concavity.item() == 0.0, envelope_concavity.item()
+
+    # The directional form: pair directions are its anchors, and it fires
+    # exactly on the negative cone.
+    one = torch.ones(4)
+
+    # l_bc = 4 != l_ab + l_ac, so h != 0 and the third identity pins the
+    # cross term, not just the diagonal.
+    assert torch.allclose(
+        directional_learning(1.0 * one, 2.0 * one, 4.0 * one, torch.zeros(4)), one
+    )
+    assert torch.allclose(
+        directional_learning(
+            1.0 * one, 2.0 * one, 4.0 * one, torch.full((4,), math.pi / 2.0)
+        ),
+        2.0 * one,
+    )
+    assert torch.allclose(
+        directional_learning(
+            1.0 * one, 2.0 * one, 4.0 * one, torch.full((4,), 3.0 * math.pi / 4.0)
+        ),
+        2.0 * one,
+    )
+    assert (
+        directional_learning(-1.0 * one, -1.0 * one, -2.0 * one, torch.zeros(4)) < 0
+    ).all()
 
     # The tie losses on the zero premium, both exact: the control tie reads
     # (0 + 0 + 0 - 1)^2 = 1 -- the degeneracy breaker doing its job -- and
@@ -281,10 +394,23 @@ if __name__ == "__main__":
     def clone(state: Sample) -> Sample:
         return Sample(*(field.detach().clone() for field in vars(state).values()))
 
-    original_loss = pde_loss(invariant, clone(batch))
-    swapped_loss = pde_loss(invariant, clone(swapped))
-    relabeled_loss = pde_loss(invariant, clone(relabeled))
+    # The graded residual only: the concavity term draws a fresh direction
+    # per call, so per-draw values differ across relabels (only its zero set
+    # is chart-invariant).
+    original_loss, _ = pde_loss(invariant, clone(batch))
+    swapped_loss, _ = pde_loss(invariant, clone(swapped))
+    relabeled_loss, _ = pde_loss(invariant, clone(relabeled))
 
-    assert torch.allclose(swapped_loss, original_loss, atol=1e-5)
-    assert torch.allclose(relabeled_loss, original_loss, atol=1e-4)
+    # RELATIVE tolerance: the natural-units loss is no longer a fixed-size
+    # number, so an atol calibrated at one magnitude means nothing at another
+    # (see three_arm_drift/loss.py, where the old atol flaked one run in
+    # three). A real S3 bug moves this by O(1), so nothing is lost.
+    assert torch.allclose(swapped_loss, original_loss, rtol=1e-3, atol=1e-9), (
+        swapped_loss.item(),
+        original_loss.item(),
+    )
+    assert torch.allclose(relabeled_loss, original_loss, rtol=1e-3, atol=1e-9), (
+        relabeled_loss.item(),
+        original_loss.item(),
+    )
     print("ok")

@@ -20,8 +20,9 @@ from torch import Tensor
 from ..problems.two_arm_drift import DimensionlessValueFunction
 from ..problems.two_arm_drift.sample import ETAHAT_MAX, PRIOR_FLOOR
 
-# Field etahat: near deployment (3% of baseline per horizon is 10.7). TAUHAT
-# is low enough that 2 etahat tauhat <= 1 for the whole family.
+# Field etahat: deep in the law's high-drift decades, where the ceiling
+# binds hardest. TAUHAT is low enough that 2 etahat tauhat <= 1 for the
+# whole family.
 ETAHAT = 10.0
 FAMILY = [0.0, 0.1, 1.0, 10.0, 30.0]
 TAUHAT = 0.01
@@ -178,7 +179,8 @@ def main(in_path: Path) -> None:
         )
         (slope,) = torch.autograd.grad(ridge_u.sum(), ridge_muhat)
         below = (policies[etahat] < 1.0 - 1e-6).nonzero()
-        commit = float(slice_z[below[-1] + 1]) if len(below) else float("nan")
+        edge = int(below[-1]) + 1 if len(below) else len(slice_z)
+        commit = float(slice_z[edge]) if edge < len(slice_z) else float("nan")
         print(
             f"{etahat:>8} {2.0 * etahat * TAUHAT:>10.3f} {float(u[0]):>9.4f}"
             f" {float(slope.mean()):>12.4f} {commit:>9.4f}"

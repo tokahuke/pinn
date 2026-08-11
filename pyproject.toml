@@ -7,15 +7,17 @@ authors = [
 ]
 readme = "README.md"
 license = {text = "Apache-2.0"}
-requires-python = ">=3.14"
+requires-python = ">=3.12"
 dependencies = [
-    "torch (>=2.13.0,<3.0.0)",
+    "torch (>=2.9.0,<3.0.0)",
     "matplotlib (>=3.11.1,<4.0.0)",
-    "click (>=8.4.2,<9.0.0)"
+    "click (>=8.4.2,<9.0.0)",
+    "python-dotenv (>=1.2.2,<2.0.0)"
 ]
 
 [project.scripts]
 arena = "pinn.arena.main:cli"
+jobq = "jobq:cli"
 pinn = "pinn.cli:cli"
 
 

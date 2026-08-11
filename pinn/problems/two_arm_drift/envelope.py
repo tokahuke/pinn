@@ -1,5 +1,5 @@
 """
-The drift problem's free-information envelope (docs/two_arm_drift.md section 7).
+The drift problem's free-information envelope (kb/two_arm_drift.md section 7).
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ def correction(muhat: Tensor, tauhat: Tensor, etahat: Tensor) -> Tensor:
         (etahat/(4 sqrt 2)) exp(-b^2) [ erfcx(a + b) + erfcx(a - b) ]
 
     Exposed separately because three_arm_drift needs it three times, once per
-    pair of arms (docs/three_arm_drift.md section 7), and subtracting nu back
+    pair of arms (kb/three_arm_drift.md section 7), and subtracting nu back
     out of `envelope` would round twice and lose the exact zero at etahat = 0.
 
     Three things the code cannot be read safely without:
@@ -68,7 +68,7 @@ def envelope(muhat: Tensor, tauhat: Tensor, etahat: Tensor) -> Tensor:
         u_env = integral_0^inf e^(-t) nu( -muhat, sqrt(1/tauhat + etahat^2 t) ) dt
 
     in closed form (derivation, citation, accuracy and the inherited nu limit:
-    docs/two_arm_drift.md section 7). With
+    kb/two_arm_drift.md section 7). With
 
         a = 1/(etahat sqrt(tauhat)),   b = muhat sqrt(tauhat/2)
 

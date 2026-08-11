@@ -532,7 +532,17 @@ in equation units it fades like $S$ and is nearly invisible below
 $\tau \sim 1$. (Two_arm escapes this because BC1 pins a premium derivative
 at every scale; the three-arm walls are lower-dimensional and cannot.)
 
-The correct grading is one power of $S$ lower -- PREMIUM units,
+**RETRACTED 2026-08-10. The grading below is WRONG and is gone from the
+code.** A weight on the residual is a reweighting of the domain, not a choice
+of units: measured on two_arm_drift, the analogous chart weight was
+$\tau^3$ across 15 decades and spent 70% of the gradient on a corner that was
+already exact to ~1e-6 relative. The residual is graded in the equation's own
+units, always; the never-explore degeneracy is the tie losses' job, and if a
+dead-Hamiltonian net scores well again the answer is a stronger breaker, not a
+thumb on the residual. See learnings section 3 for the standing rule. The
+derivation is kept below because the failure mode it names is real.
+
+~~The correct grading is one power of $S$ lower -- PREMIUM units,~~
 
 $$
 w \;=\; \frac{S^{3/2}}{e_1(I)} \;=\; \frac{(\det T)^{3/4}}{\tau_{bb}+\tau_{cc}+\tau_{bc}},

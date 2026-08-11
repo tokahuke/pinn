@@ -13,39 +13,47 @@ from ...train import Objective
 from .model import DimensionlessValueFunction
 from .sample import sample_ridge, sample_sobol
 
-RIDGE_WEIGHT = 10.0
-POWER = 2.0
+# Dead-solution floor: u = 0 scores pde exactly 0 and ridge exactly 0.25, so
+# 100 * pde / 0.25 leaves the dead branch 100x worse than the live one.
+# Re-derive after any large pde move -- the previous 2.0e5 was set at pde 483
+# and left standing at pde 7e-2, i.e. 7000x its own criterion. At 28 the ridge
+# settles near 3e-5 rather than the 5e-8 it held at 2.0e5: enforced weakly, not
+# diverging.
+RIDGE_WEIGHT = 2.8e1
 
-# Weight on the learning operator's negative part. L_ab >= 0 is provable for
-# the answer and INVISIBLE to the residual: it enters the equation only through
-# alpha(1-alpha) <= 1/4, while the policy is its argmax and moves like 1/L^2.
-# So the residual can be excellent while the policy is ill-posed -- measured
-# 2026-08-08, L_ab < 0 on 39.6% of the cloud at pde 1.5e-6, rising to 60% at
-# etahat > 10, with a re-entrant commit region to match.
-#
-# Zero at the answer, so it cannot move the fixed point, only the path. The
-# term is LINEAR in the violation (see pde_loss); at the pre-positivity
-# checkpoint its mean is ~2e-3 against pde 1.3e-6, so 6e-4 would make the two
-# comparable. Deliberately two orders above that: the point of the experiment
-# is to see whether the SIGN pattern moves at all, and a term merely comparable
-# to pde was not going to shift a 38% violating fraction. At this weight
-# positivity is ~200x the pde term and is driving; pde will give ground.
+# Plain mean-of-squares. P = 2 compensated for the chart weight's suppressed
+# tail; in natural units it over-corrects, dropping the effective sample size
+# at batch 4096 to 2.1 points on three_arm (54 at P = 1).
+POWER = 1.0
+
+# L_ab >= 0 is provable and INVISIBLE to the residual, which sees it only
+# through alpha(1-alpha) <= 1/4 while the policy is its argmax: the residual
+# can be excellent with the policy ill-posed. Zero at the answer, so it moves
+# the path, not the fixed point. Bounded per point by the saturation in
+# pde_loss, so not comparable to the pre-2026-08-10 weights; holds ~1% of pde.
+POSITIVITY_SCALE = 1.0e-7
 POSITIVITY_WEIGHT = 6.0e-2
 
 
 def pde_loss(
-    value: DimensionlessValueFunction, muhat: Tensor, tauhat: Tensor, etahat: Tensor
+    value: DimensionlessValueFunction,
+    muhat: Tensor,
+    tauhat: Tensor,
+    etahat: Tensor,
 ) -> Tensor:
     """
     Returns TWO numbers: the squared residual of the HJB in similarity coordinates
-    (docs/two_arm_drift.md section 6), maximization kept explicit:
+    (kb/two_arm_drift.md section 6), maximization kept explicit:
 
         e^s (z + g) + etahat^2 e^(2s) tauhat_slope
             = max over alpha of { alpha e^s z + alpha(1-alpha) L_ab[g] }
 
-    Graded in this chart for two_arm's reason: the 1/(2 tauhat^2) that
-    multiplied curvature is cancelled algebraically. The leaves are (z, s) and
-    autograd does the chain rule; __main__ checks it against the raw form.
+    DERIVED in this chart for two_arm's reason -- the 1/(2 tauhat^2) that
+    multiplied curvature is cancelled algebraically, and the leaves are (z, s)
+    with autograd doing the chain rule -- but GRADED in natural units: the
+    chart residual is tauhat**(3/2) times the equation's own, so it is divided
+    back out before grading. See two_arm/loss.py for the record and the
+    standing rule; __main__ checks the identity against the raw form.
 
     KNOWN DEGENERATE on its own: g = 0 (the never-explore solution) zeroes this
     residual exactly, at every etahat -- the drift extension does NOT break the
@@ -66,13 +74,27 @@ def pde_loss(
     way to buy positivity.
     """
     lhs, best, l_ab = value.hamiltonian(muhat, tauhat, etahat)
+    # Natural units: undo the chart's tauhat**(3/2). L_ab carries the same
+    # factor (L_ab = tauhat**(3/2) lhat), so the positivity term is divided
+    # too -- same sign, natural magnitude.
+    natural = tauhat.pow(1.5)
 
-    return _graded(lhs - best.value), torch.relu(-l_ab).mean()
+    # SATURATED, and not in natural units: relu is linear in depth, so one deep
+    # violation dominates (max/mean 15,905x raw, 116,628x divided) and spiked
+    # the gradient norm 1.86 -> 1850 in a single step. y / (s + y) is bounded
+    # per point, linear below s, 1/y^2 above -- NOT tanh (gradient underflows).
+    violation = torch.relu(-l_ab)
+
+    return (
+        _graded((lhs - best.value) / natural),
+        (violation / (POSITIVITY_SCALE + violation)).mean(),
+    )
 
 
 def _graded(residual: Tensor) -> Tensor:
     """
-    The problem's own grading: no relative scale, power-mean attention
+    The problem's own grading: NEVER a scale on the residual, power-mean
+    attention
     (two_arm/loss.py explains both). The HJB residual only.
     """
     graded = residual.pow(2)
@@ -123,17 +145,34 @@ def loss(
     return pde + RIDGE_WEIGHT * ridge + POSITIVITY_WEIGHT * pos_learning
 
 
-def objective(batch: int = 1024) -> Objective:
+def draw(batch: int, device: str = "cpu") -> tuple[Tensor, ...]:
+    """
+    One step's collocation tensors, in loss()'s argument order.
+
+    Split out of objective so the graphed trainer can hold them as fixed
+    buffers and copy_ fresh draws in: a captured cuda graph replays the same
+    tensor addresses, so the sampling has to live outside it.
+    """
+    return (
+        *(t.to(device) for t in sample_sobol(batch)),
+        *(t.to(device) for t in sample_ridge(batch // 4)),
+    )
+
+
+def objective(batch: int = 1024, device: str = "cpu") -> Objective:
     """
     The problem packaged for the generic trainer: fresh Sobol + ridge draws,
     scored by loss.
+
+    `device` is the ONE place the trainer's device enters the problem. Sobol
+    draws on CPU (SobolEngine ignores the default device) and the batch moves
+    once; everything downstream inherits from its inputs, so no loss, model or
+    sampler needs to know a device exists. Defaults to CPU, which is what the
+    arena, probes and every module self-check rely on.
     """
 
     def step(value: DimensionlessValueFunction, iteration: int | None) -> Tensor:
-        muhat, tauhat, etahat = sample_sobol(batch)
-        ridge_tauhat, ridge_etahat = sample_ridge(batch // 4)
-
-        return loss(value, muhat, tauhat, etahat, ridge_tauhat, ridge_etahat, iteration)
+        return loss(value, *draw(batch, device), iteration)
 
     return step
 

@@ -32,7 +32,7 @@ ANCHORS = np.array(
 
 def atlas() -> None:
     value = ValueFunction(
-        DimensionlessValueFunction.load("data/value_3a_64:64:64.pt"), rho=1.0, sigma=1.0
+        DimensionlessValueFunction.load("data/three_arm.pt"), rho=1.0, sigma=1.0
     )
     taus = [0.03, 0.3, 1.0, 3.0]
     n = 220
@@ -209,7 +209,65 @@ def arena_three() -> None:
     )
 
 
+def arena_drift() -> None:
+    """
+    The drifting-world arena: the fixed drift entrants (drift_grid_fixed.pkl)
+    beside the static-net transplant from the original grid, restricted to
+    the reps both sweeps share so every bar plays the same tests. The worlds
+    were verified identical (paired TS old-vs-new differences are
+    statistically zero), which is what licenses mixing the two pickles.
+    """
+    fixed = pickle.loads(open("data/drift_grid_fixed.pkl", "rb").read())
+    original = pickle.loads(open("data/drift_grid.pkl", "rb").read())
+
+    def drifting(study, wanted: str) -> dict[tuple, object]:
+        return {
+            tuple(r.delta): r for r in study.runs if r.policy == f"drifting/{wanted}"
+        }
+
+    kept = {
+        name: drifting(fixed, name)
+        for name in ("Pinn-aware", "Pinn-blind", "TS-aware", "TS-blind")
+    }
+    kept["Pinn-static"] = drifting(original, "Pinn-twoarm")
+    shared = set.intersection(*(set(runs) for runs in kept.values()))
+
+    merged = pickle.loads(open("data/drift_grid_fixed.pkl", "rb").read())
+    merged.runs = []
+
+    for name, runs in kept.items():
+        for key in shared:
+            run = runs[key]
+            # arena() normalizes by the literal name "ProbabilityMatching".
+            run.policy = "ProbabilityMatching" if name == "TS-blind" else name
+            merged.runs.append(run)
+    open("data/drift_grid_chart.pkl", "wb").write(pickle.dumps(merged))
+
+    arena(
+        study_path="data/drift_grid_chart.pkl",
+        out_path="docs/arena_two_arm_drift.png",
+        suptitle="A/B test policy arena, drifting world",
+        entities=[
+            ("Pinn-static", "PINN, static net\n(transplanted unchanged)", BLUE),
+            ("Pinn-blind", "PINN, drift net\n(told there is no drift)", "#7aa8e0"),
+            ("Pinn-aware", "PINN, drift net\n(told the true drift)", "#164a8a"),
+            ("ProbabilityMatching", "Thompson sampling", ORANGE),
+            ("TS-aware", "Thompson, drift-aware\n(forgetful posterior)", YELLOW),
+        ],
+        caption=(
+            "Each strategy plays the same 500 random A/B tests in a world whose true effect never stops wandering.\n"
+            "Regret: profit left on the table vs an oracle that follows the MOVING winner (lower is better). Evidence:\n"
+            "total measurement bought, in perfect-split epochs. The static-world PINN transplanted unchanged still edges\n"
+            "out Thompson; the drift net at its no-drift setting matches them; telling it the truth makes it explore least\n"
+            "and lose most. Awareness of drift is not yet paying for itself - the drift-regime slice of the solve is the\n"
+            "open frontier, not the machinery around it."
+        ),
+        xlim=2.2,
+    )
+
+
 if __name__ == "__main__":
     atlas()
     arena()
     arena_three()
+    arena_drift()

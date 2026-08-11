@@ -21,7 +21,7 @@ Yes, it even beats Thompson Sampling for a simple AB test. Oh! If you have been 
 | explore-then-commit | 1.65 | 13.0% | 100% | 0.33 |
 | z-test at 5% | 1.81 | 10.7% | 93.7% | 0.67 |
 
-Slightly better than TS in terms of "gains left on the table" (regret) and with the added benefit that _it actually stops_. It also needs to explore less in total. TS, even though it can deliver the goods, is known to be quite the over-curious explorer and the neural network fixes that. Full tables, including the three-arm arena, live in [docs/arena_results.md](docs/arena_results.md).
+Slightly better than TS in terms of "gains left on the table" (regret) and with the added benefit that _it actually stops_. It also needs to explore less in total. TS, even though it can deliver the goods, is known to be quite the over-curious explorer and the neural network fixes that. Full tables, including the three-arm arena, live in [kb/arena_results.md](kb/arena_results.md).
 
 ## Beyond just AB
 
@@ -41,7 +41,7 @@ This "Gaussian blur"-thingy vanishing with information shows the net being more 
 | explore-then-commit | 1.81 | 20.9% | 100% | 0.29 |
 
 What about ABCD? Man, the equations are *gnarly* for ABC already and should just be impossible for ABCD, but if you want to build it, you are welcome to contribute with a PR. There is already some support and some tips about how to do it in
-[docs/learnings.md](docs/learnings.md). However, be warned that PINNs do not scale to even hundreds of input dimensions and the number of features you have to feed the network is quadratic.
+[kb/learnings.md](kb/learnings.md). However, be warned that PINNs do not scale to even hundreds of input dimensions and the number of features you have to feed the network is quadratic.
 
 ### More coming in the future
 
@@ -53,8 +53,8 @@ A quick map of the repo, for the curious:
 
 - `pinn/problems/two_arm` and `pinn/problems/three_arm`: the trainable models,
   samplers, and PDE losses (dimensionless, wedge-quotiented by the problems'
-  exact symmetries). The math lives in `docs/two_arm.md` and
-  `docs/three_arm.md`; the transferable method in `docs/learnings.md`.
+  exact symmetries). The math lives in `kb/two_arm.md` and
+  `kb/three_arm.md`; the transferable method in `kb/learnings.md`.
 - `pinn/arena`: the policy shoot-out. An N-arm regret harness, the baseline
   zoo (Thompson, explore-then-commit, z-test/elimination), and the PINN
   entrant. Run it with `poetry run arena simulate ...` and then
@@ -66,9 +66,10 @@ A quick map of the repo, for the curious:
 
 Trained models are published on the
 [latest release](https://github.com/tokahuke/pinn/releases/latest). If you
-just want it to work, take `value_2a_32x512.pt` for two arms and
-`value_3a_64x64x64.pt` for three arms; the other assets are archival.
-Everything else in this repo exists to train, test, and beat those two files.
+just want it to work, grab the two-arm and three-arm champions and drop them
+into `data/` as `two_arm.pt` and `three_arm.pt` — that is where every command
+and snippet here looks for them; the other assets are archival. Everything
+else in this repo exists to train, test, and beat those two files.
 
 ## Quickstart
 
@@ -97,7 +98,7 @@ from pinn.problems.two_arm import DimensionlessValueFunction, ValueFunction
 # Your experiment's economics: sigma is the noise scale of one observation,
 # rho the discount rate per observation (how impatient you are).
 value = ValueFunction(
-    DimensionlessValueFunction.load("data/value_2a_32x512.pt"),
+    DimensionlessValueFunction.load("data/two_arm.pt"),
     rho=0.001,
     sigma=50.0,
 )

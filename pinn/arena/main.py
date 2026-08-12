@@ -10,14 +10,18 @@ import click
 import pickle
 
 import sys
+import torch
 
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from importlib import import_module
 from inspect import isabstract
 from pathlib import Path
 from typing import Iterator
 
 from .harness import Params, Policy, Run, Runner, Study
+
+# Reps per batched chunk: caps the noise buffer (~120 MB at the production horizon)
+# and keeps the progress line moving.
+CHUNK = 4096
 
 
 def concrete_policies(cls: type[Policy] = Policy) -> Iterator[type[Policy]]:
@@ -31,27 +35,6 @@ def concrete_policies(cls: type[Policy] = Policy) -> Iterator[type[Policy]]:
 
         if not isabstract(sub):
             yield sub
-
-
-def run_job(job: tuple[int, str, Policy]) -> Run:
-    """
-    One simulation in a worker process. Top level so it pickles; the problem
-    travels by module name for the same reason.
-    """
-    import torch
-
-    # One intra-op thread per worker: the pool already fills the cores, and
-    # torch's default threading on top oversubscribes them (observed: laptop
-    # as lap-grill).
-    torch.set_num_threads(1)
-
-    seed, problem_name, policy = job
-    problem = import_module(problem_name)
-    runner = Runner(policy.params, seed=seed)
-    result = runner.run(problem, policy, problem.draw_effect(runner))
-    result.policy = type(policy).__name__
-
-    return result
 
 
 @click.group()
@@ -84,7 +67,14 @@ def cli() -> None:
     "--workers",
     type=int,
     default=None,
-    help="Pool size; default all cores. Fewer keeps the laptop usable.",
+    help="Torch CPU threads; default all cores. Fewer keeps the laptop usable.",
+)
+@click.option(
+    "--device",
+    type=str,
+    default="cpu",
+    show_default=True,
+    help="Torch device for the batched simulation.",
 )
 def simulate(
     runs: Path,
@@ -97,7 +87,11 @@ def simulate(
     eta: float,
     size: int,
     workers: int | None,
+    device: str,
 ) -> None:
+    if workers is not None:
+        torch.set_num_threads(workers)
+
     module = import_module(f"pinn.arena.{problem}")
     params = Params(
         rho=rho,
@@ -108,29 +102,22 @@ def simulate(
         size=size,
         eta=eta,
     )
-    # Seeded by REP, not by job: every
-    # policy in a rep sees the same effect draw and noise stream (until
-    # allocations diverge), so cross-policy comparisons are paired.
-    jobs = [
-        (rep, module.__name__, cls.init(params))
-        for rep in range(size)
-        for cls in concrete_policies()
-    ]
+    # Vectorized over reps, chunked to bound memory. Seeded by REP: every
+    # policy sees the same per-rep noise stream (until allocations diverge),
+    # so cross-policy comparisons are paired -- and a rep's stream is
+    # independent of its chunk, so chunking does not move any number.
+    classes = list(concrete_policies())
+    results: list[Run] = []
+    total = size * len(classes)
 
-    # Unordered collection (imap_unordered, executor-style): results are
-    # grouped by Run.policy at analyze time, so completion order is fine and
-    # the progress line reflects actual work done, not the slowest prefix.
-    step = max(1, len(jobs) // 50)
-
-    with ProcessPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(run_job, job) for job in jobs]
-        results = []
-
-        for future in as_completed(futures):
-            results.append(future.result())
-
-            if len(results) % step == 0 or len(results) == len(jobs):
-                print(f"{len(results)}/{len(jobs)}", file=sys.stderr, flush=True)
+    for cls in classes:
+        for chunk_start in range(0, size, CHUNK):
+            seeds = list(range(chunk_start, min(chunk_start + CHUNK, size)))
+            runner = Runner(params, seeds, device)
+            policy = cls.init(params, len(seeds), device)
+            batch = runner.run(module, policy, module.draw_effect(runner))
+            results.extend(batch.runs())
+            print(f"{len(results)}/{total}", file=sys.stderr, flush=True)
 
     runs.write_bytes(pickle.dumps(Study(params=params, runs=results)))
 

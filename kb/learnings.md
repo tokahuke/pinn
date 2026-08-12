@@ -402,3 +402,60 @@ Rules purchased:
 - Transient agreement with a wrong expectation is doubly treacherous: the
   half-trained net LOOKED like it confirmed the hypothesis (three-way splits
   everywhere) and then "regressed" — the regression was convergence.
+
+## 11. Warm starts: a converged parent is a local minimum (2026-08-12)
+
+Inheriting weights from a solved sibling problem buys the first few thousand
+iterations and then costs everything after. Measured on two_arm_drift, which
+is two_arm plus one coordinate: the drift net can be initialized from a
+two_arm checkpoint and reproduces it BITWISE on the `etahat = 0` slice, because
+the drift feature `log1p(2 etahat tauhat)` vanishes identically there. The
+bootstrap is exact, cheap, and structurally protected -- and still the wrong
+move.
+
+Same architecture (823 params, 24:24), same learning rate, matched iterations:
+
+    pde            @10k        @20k        @29k
+    scratch        7.323e-01   1.230e-02   6.150e-03
+    bootstrapped   5.418e-02   1.863e-02   7.720e-03
+
+    pos_learning   @10k        @20k        @29k
+    scratch        1.75e-01    4.69e-03    4.18e-04   (exactly 0 by 97k)
+    bootstrapped   5.54e-02    4.50e-02    1.33e-02
+
+The bootstrap leads 13x at 10k, is overtaken before 20k, and by 29k is behind
+on both. The pde gap is modest; the CONSTRAINT gap is the real damage --
+the scratch net sheds three orders of learning-operator violation while the
+bootstrapped one sheds a factor of four and parks.
+
+Mechanism: the parent arrives with every first-layer unit committed to a
+converged 1-D structure (in two_arm, a ladder of `tauhat` crossovers, section
+in kb/two_arm.md). The child's problem needs that structure to become 2-D. The
+net must dismantle what it inherited, and while dismantling, the cheapest local
+move is to let the constrained quantity go negative.
+
+The damage is SLOW, not permanent -- corrected 2026-08-12 after the run
+continued. The bootstrapped net did reach `pos_learning` exactly 0, at ~145k
+iterations, having been at 1.3e-2 at 29k and 2.1e-5 at 106k. So the honest
+cost is roughly 100k iterations spent undoing the inheritance, not a floor the
+net never leaves. Judge a warm start on the ITERATIONS IT WASTES, and note
+that at 29k every measurement said the penalty looked permanent.
+
+Rules:
+- Warm-start ACROSS problems only when the parent's structure is a SUBSET of
+  what the child needs, not when it must be reorganized. "Exact on a slice" is
+  not the same as "useful off it", and the exactness is what makes the trap
+  convincing.
+- Judge a warm start at MATCHED ITERATIONS against scratch, and judge it on
+  the constraint terms, not the residual. At 10k every number said the
+  bootstrap was winning.
+- Warm starts want a HOT rate, not a gentle one, exactly opposite to the
+  instinct that a converged parent must be protected from smearing. At 3e-4
+  the bootstrapped net was 4.7x worse on pde and 2.6x worse on pos_learning
+  than the same net at 1e-3: a gentle rate does not preserve the inherited
+  solution, it strands the net in the parent's basin.
+- This indicts WEIGHT inheritance, not feature reuse. Handing the child the
+  parent's OUTPUT as an input feature is a different mechanism -- the child
+  keeps its own weights free and only queries a function. Do not let this
+  result talk you out of the pairwise-basis route (kb/three_arm.md).
+

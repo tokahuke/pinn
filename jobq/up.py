@@ -9,7 +9,7 @@ import subprocess
 
 from importlib.resources import files
 
-from .pod import KEY, REMOTE, env, find, runpodctl, shell, ssh_flags, ssh_info
+from .pod import KEY, find, runpodctl, ssh_flags, ssh_info, sync_repo
 
 # Ships a working CUDA torch on python 3.12; setup.sh inherits both through
 # a --system-site-packages venv rather than reinstalling 2.5GB of torch.
@@ -118,26 +118,7 @@ def up(
     address, port = detail["ip"], detail["port"]
     click.echo(f"{name} ({pod['id']}) at {address}:{port}")
 
-    shell(
-        [
-            "rsync",
-            "-az",
-            "--delete",
-            "-e",
-            f"ssh {' '.join(ssh_flags(port))}",
-            "--exclude",
-            ".git",
-            "--exclude",
-            "data",
-            "--exclude",
-            ".venv",
-            "--exclude",
-            "__pycache__",
-            "./",
-            f"root@{address}:{REMOTE}/",
-        ],
-        "rsync",
-    )
+    sync_repo(address, port)
 
     if idle > 0:
         seppuku = (

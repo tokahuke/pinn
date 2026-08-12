@@ -16,32 +16,45 @@ LANDING = Path("data/pod")
 
 
 def fetch(address: str, port: int) -> str:
-    """Checkpoints off the pod into data/pod."""
+    """
+    Every checkpoint under /workspace, at any depth, into data/pod.
+
+    Two traps, both found by a --dry-run before a real teardown. `--exclude
+    '*'` excludes DIRECTORIES too, so without `--include '*/'` rsync never
+    descends and a sweep writing to /workspace/sweep/ is silently left behind.
+    And rsync refuses two remote sources in one call -- it printed its usage
+    and returned non-zero, which this treats as a failed fetch. One recursive
+    source covers both, since REMOTE lives under /workspace.
+    """
     LANDING.mkdir(parents=True, exist_ok=True)
-    before = set(LANDING.glob("*.pt"))
+    before = set(LANDING.rglob("*.pt"))
     # Not fatal: a pod whose ssh has died still has to be destroyable, or it
     # bills forever.
     code = shell(
         [
             "rsync",
             "-az",
+            "--prune-empty-dirs",
             "-e",
             f"ssh {' '.join(ssh_flags(port))}",
+            "--exclude",
+            "venv/",
+            "--include",
+            "*/",
             "--include",
             "*.pt",
             "--exclude",
             "*",
             f"root@{address}:/workspace/",
-            f"root@{address}:{REMOTE}/",
             str(LANDING),
         ],
         "fetch",
         fatal=False,
     )
-    arrived = len(set(LANDING.glob("*.pt")) - before)
+    arrived = len(set(LANDING.rglob("*.pt")) - before)
 
     if code != 0:
-        return f"rsync failed ({code}), {arrived} new .pt in {LANDING}"
+        return f"rsync FAILED ({code}) -- {arrived} new .pt in {LANDING}"
 
     return f"{arrived} new .pt in {LANDING}"
 

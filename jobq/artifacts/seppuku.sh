@@ -32,11 +32,19 @@ if [ -z "$POD_ID" ] || [ -z "$API_KEY" ]; then
     exit 1
 fi
 
-sessions() {
-    # sshd forks one process per session, titled "sshd: root@pts/0" (or
-    # "@notty" for rsync). Counting those needs no iproute2 and no utmp,
-    # neither of which a container reliably has.
-    pgrep -c -f 'sshd:.*@' || true
+busy() {
+    # Alive means training is running OR someone is interactively attached.
+    #
+    # The tty distinction is load-bearing: sshd titles a session
+    # "sshd: root@pts/0" when it has a tty (jobq run uses ssh -t) and
+    # "sshd: root@notty" otherwise, which is what rsync and one-shot ssh get.
+    # Counting notty would let a backup poller keep the pod alive forever --
+    # and the whole point of a poller is to make teardown survivable, since
+    # this script has nowhere to push work at the moment it fires.
+    pgrep -f '/workspace/venv/bin/python' >/dev/null && return 0
+    pgrep -f 'sshd:.*@pts' >/dev/null && return 0
+
+    return 1
 }
 
 echo "$(date -Is) armed for $POD_ID, ${IDLE_MINUTES}m" >>"$LOG"
@@ -46,7 +54,7 @@ idle=0
 while true; do
     sleep 60
 
-    if [ "$(sessions)" -gt 0 ]; then
+    if busy; then
         idle=0
         continue
     fi

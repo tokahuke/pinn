@@ -226,29 +226,23 @@ not results:
     two_arm 5.704   two_arm_drift 98.9   three_arm 1.42e-3   three_arm_drift 3.02
 
 - two_arm: `two_arm.pt` — retrained 2026-08-09 through an escalating
-  pos_learning weight; the pre-retrain net is `two_arm.2026-08-09.pt`.
-  Floor-decade `L_ab < 0` went 16.0% -> 6.8% and the commit-on-no-evidence
-  shelf is gone at every muhat. `two_arm.2026-08-04-legacy-arch.pt` is the
-  old-architecture historical reference (loads only at the initial commit's
-  class).
+  pos_learning weight. Floor-decade `L_ab < 0` went 16.0% -> 6.8% and the
+  commit-on-no-evidence shelf is gone at every muhat.
 - two_arm_drift: `two_arm_drift.pt` — the 10x-positivity net, bootstrapped
   `--from data/two_arm.pt` (the exact `etahat = 0` slice) with the raised
-  weight on from step 0. It beat its predecessor, now archived as
-  `two_arm_drift.2026-08-09.pt`, on every training-side metric: the targeted
+  weight on from step 0. It beat its predecessor on every training-side
+  metric: the targeted
   middle decade `etahat` in [1, 10) went 10.5% -> 6.5% violating, and the
   top decades cleaned up too. Bootstrapping rather than resuming was
   deliberate: every 2ad net that acquired the term partway through kept a
   commit-on-no-evidence needle near the ridge. No kink branch.
 - three_arm: `three_arm.pt` — 3 hidden layers with 8 stitched saturated kink
-  units, trained through the concavity term overnight 2026-08-10; the
-  pre-concavity net is `three_arm.2026-08-08.pt`. The kink stitch was the
-  decisive move (tail -19%, worst point -25% in one 30k run, junction
-  specialist unit self-oriented onto `z_bc`).
-  `three_arm.2026-08-07-kink16.pt` is the from-scratch 16-kink co-training
-  experiment (communal branch anatomy, no junction specialist — sequencing
-  is load-bearing, see learnings section 8).
-- three_arm_drift: `three_arm_drift.pt` — concavity-trained 2026-08-10, the
-  pre-concavity net archived as `three_arm_drift.2026-08-08.pt`. Still the
+  units, trained through the concavity term overnight 2026-08-10. The kink
+  stitch was the decisive move (tail -19%, worst point -25% in one 30k run,
+  junction specialist unit self-oriented onto `z_bc`). A from-scratch
+  16-kink co-training run gave communal branch anatomy and no junction
+  specialist -- sequencing is load-bearing, see learnings section 8.
+- three_arm_drift: `three_arm_drift.pt` — concavity-trained 2026-08-10. Still the
   furthest from converged of the four (its starting pde is ~3 orders above
   three_arm's) and it was descending when stopped. Grafted from the
   pre-2026-08-07 three_arm champion, so its bit-exact-at-`etahat = 0`

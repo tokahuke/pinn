@@ -129,6 +129,41 @@ Use these as consistency checks on any numerical solution:
 
   (The law is unchanged by the premium substitution: the removed piece is linear
   in `mu` on `mu > 0`.)
+- Free-boundary LOCATION, empirical (2026-08-11): the boundary is very nearly a
+  level set of `muhat * tauhat**q` with `q` in [0.75, 0.8]. Measured as the
+  spread of the coordinate over points straddling the learned boundary
+  (IQR / |median|, smaller is tighter), on two independently trained nets:
+
+      net                     q=0.5 (z)   q=0.75   q=0.8   q=1.0
+      32:256, 9154 params        1.19       0.29      --     0.52
+      16:16,   402 params         --        0.152    0.114   0.522
+
+  Two things worth keeping. The exponent is NOT 0.5, so the similarity
+  coordinate `z = muhat sqrt(tauhat)` is the wrong variable for the boundary
+  even though it is the right one for the chart. And the SMALLER net has the
+  crisper boundary (0.114 against 0.29), so this is a property of the
+  solution, not an artifact of capacity.
+
+  Feeding `muhat * tauhat**0.75` to the net as a fifth feature does NOT help:
+  tried 2026-08-11 on two_arm, the net ignored it (weight mass 1.2e-3 against
+  102 for the four it keeps) and pde was unchanged. It is a monomial in
+  features already present, so there is nothing to hand over. Recorded so the
+  experiment is not repeated.
+- How the net represents the tau dependence (2026-08-11, 402-param 16:16 net,
+  all 16 first-layer units live): 11 of 16 units carry OPPOSING weights on
+  `muhat sqrt(tauhat)` and `muhat tauhat`, making each preactivation
+  `muhat sqrt(tauhat) (a - b sqrt(tauhat))`, which changes sign at
+  `tauhat = (a/b)**2`. The learned crossovers tile the information axis --
+  0.34, 0.60, 0.62, 0.65, 0.85, 0.93, 1.18, 1.65, 4.72, 8.56, 49.1 -- i.e. the
+  first layer is a ladder of characteristic information scales, built from the
+  only feature pair that can produce a tunable crossover. Sets a floor on
+  useful width: the ladder needs rungs.
+
+  In two_arm_drift the same trick is available on the log pair: `log tauhat`
+  against `log1p(2 etahat tauhat)` crosses where `2 etahat tauhat ~ 1`, the
+  erosion timescale. Note that fifth feature vanishes identically at
+  `etahat = 0`, so the eta = 0 slice of a drift net is a function of the first
+  four columns alone whatever the fifth column learns.
 
 ## 7. Prior art / failed and partial attempts (context, do not redo)
 

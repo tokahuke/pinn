@@ -3,6 +3,11 @@ The arena's generic core: the policy contract, the environment runner, and
 discounted-regret bookkeeping, N-arm (allocations are simplex vectors; arm 0
 is control, its effect 0). Per-problem modules (two_arm, three_arm) supply
 the effect draw, the observation model, and the policy zoo.
+
+Everything is vectorized over REPS: state tensors carry a leading (reps,)
+dimension, the epoch loop is the only sequential axis, and each rep's noise
+stream is a function of its seed alone, so a rep's numbers do not depend on
+the batch around it (the demo asserts it).
 """
 
 from __future__ import annotations
@@ -33,9 +38,15 @@ class Params:
 
 
 class Policy(ABC):
+    """
+    A policy over a batch of reps: state is (reps,)-shaped, `propose` returns
+    (reps, arms), `observe` takes the batched observation. Rep i's numbers
+    must not depend on the batch around it -- the demo asserts it.
+    """
+
     @classmethod
     @abstractmethod
-    def init(cls, params: Params) -> Self:
+    def init(cls, params: Params, reps: int, device: str) -> Self:
         pass
 
     @abstractmethod
@@ -94,6 +105,51 @@ class Run:
 
 
 @dataclass
+class Batch:
+    """
+    `Run` over a whole batch: the same bookkeeping, each field a (reps,)- or
+    (reps, arms)-shaped tensor, `committed`/`committed_at` carrying -1 for
+    never. `runs()` explodes back to scalar Runs, the pickle format analyze
+    reads.
+    """
+
+    delta: Tensor
+    regret: Tensor
+    precision_time: Tensor
+    final_allocation: Tensor
+    committed: Tensor
+    committed_at: Tensor
+    epochs: int
+    policy: str
+
+    def runs(self) -> list[Run]:
+        delta = self.delta.cpu()
+        regret = self.regret.cpu()
+        precision_time = self.precision_time.cpu()
+        final_allocation = self.final_allocation.cpu()
+        committed = self.committed.cpu()
+        committed_at = self.committed_at.cpu()
+        out = []
+
+        for i in range(delta.shape[0]):
+            at = int(committed_at[i])
+            out.append(
+                Run(
+                    delta=[float(d) for d in delta[i]],
+                    policy=self.policy,
+                    epochs=self.epochs,
+                    precision_time=float(precision_time[i]),
+                    final_allocation=[float(a) for a in final_allocation[i]],
+                    regret=float(regret[i]),
+                    committed=int(committed[i]) if at >= 0 else None,
+                    committed_at=at if at >= 0 else None,
+                )
+            )
+
+        return out
+
+
+@dataclass
 class Study:
     """
     A whole simulation as pickled: the environment it ran under, plus every run.
@@ -109,82 +165,171 @@ class Study:
 @dataclass
 class Runner:
     """
-    The environment a policy is played against: noise scale, horizon, discount, rng.
+    The environment a batch of reps is played against: noise scale, horizon,
+    discount, and one noise row per seed, pre-drawn and consumed through
+    per-rep cursors. Regret at epoch t is discounted by rho**t, with
+    rho = 1 - gamma for a decay rate gamma in epoch^-1.
 
-    Regret at epoch t is discounted by rho**t, with rho = 1 - gamma for a decay rate
-    gamma in epoch^-1.
-
-    A single rng is drawn down across every run, so the seed reproduces a whole
-    sweep rather than an individual experiment.
+    A masked `normal` advances only the consuming reps' cursors, so a rep at
+    a vertex (which buys no draw) keeps its stream aligned with the same seed
+    in any other batch.
     """
 
     params: Params
-    seed: int = 0
-    rng: torch.Generator = field(init=False)
+    seeds: list[int]
+    device: str = "cpu"
+    noise: Tensor = field(init=False)
+    cursor: Tensor = field(init=False)
 
     def __post_init__(self) -> None:
-        self.rng = torch.Generator()
-        self.rng.manual_seed(self.seed)
+        # 2 + 2 * horizon covers the hungriest zoo (three_arm: a two-draw
+        # effect, then at most two draws per epoch).
+        capacity = 2 + 2 * self.params.horizon
+        rows = torch.empty(len(self.seeds), capacity)
 
-    @property
-    def horizon(self) -> int:
-        return self.params.horizon
+        for i, seed in enumerate(self.seeds):
+            generator = torch.Generator()
+            generator.manual_seed(seed)
+            rows[i] = torch.randn(capacity, generator=generator)
 
-    @property
-    def rho(self) -> float:
-        return self.params.rho
+        self.noise = rows.to(self.device)
+        self.cursor = torch.zeros(len(self.seeds), dtype=torch.long, device=self.device)
 
-    @property
-    def effective_horizon(self) -> float:
-        return 1.0 / (1.0 - self.rho)
-
-    def normal(self, mean: float, deviation: float) -> float:
-        return float(torch.randn((), generator=self.rng)) * deviation + mean
-
-    def run(self, problem, policy: Policy, deltas: Tensor) -> Run:
+    def normal(
+        self,
+        mean: Tensor | float,
+        deviation: Tensor | float,
+        mask: Tensor | None = None,
+    ) -> Tensor:
         """
-        Play `policy` against the environment for the full horizon.
+        The next variate of every rep's stream, scaled per rep; masked-out
+        reps consume nothing and read 0.
+        """
+        draw = self.noise.gather(1, self.cursor.unsqueeze(1)).squeeze(1).double()
 
-        Takes an already-built policy, since the caller constructs one per job via
-        `Policy.init`. Reusing an instance across two runs carries state between them.
+        if mask is None:
+            self.cursor += 1
+
+            return draw * deviation + mean
+
+        self.cursor += mask.long()
+
+        return torch.where(mask, draw * deviation + mean, torch.zeros_like(draw))
+
+    def run(self, problem, policy: Policy, deltas: Tensor) -> Batch:
+        """
+        Play `policy` against the environment for the full horizon, all reps
+        at once; the epoch loop is the only sequential axis. Commit detection
+        is a masked first crossing of an exact vertex. Allocations and deltas
+        are float32, the accumulators float64.
 
         The truth advances every epoch through `problem.advance`, which is the
         identity at eta = 0, so there is no static/drifting branch anywhere in
         the loop. Regret is measured against an oracle that puts everything on
         the best arm AT THAT EPOCH -- under drift the oracle switches with the
-        world.
-
-        Every epoch is simulated. The old shortcut (a vertex is absorbing, so
-        fast-forward the discounted tail) is exact only when the truth is
-        frozen; with drift a committed policy keeps accruing against a moving
-        oracle and can profitably come back.
+        world, and a committed policy keeps accruing against it, so every
+        epoch is simulated.
         """
-        result = Run(delta=[float(d) for d in deltas])
+        reps, arms = deltas.shape
+        start = deltas
+        regret = torch.zeros(reps, dtype=torch.float64, device=self.device)
+        precision_time = torch.zeros(reps, dtype=torch.float64, device=self.device)
+        committed = torch.full((reps,), -1, dtype=torch.long, device=self.device)
+        committed_at = torch.full((reps,), -1, dtype=torch.long, device=self.device)
 
-        for epoch in range(self.horizon):
+        for epoch in range(self.params.horizon):
             allocation = policy.propose()
-            result.epochs = epoch + 1
-            result.final_allocation = [float(a) for a in allocation]
-            best = float(deltas.max())
-            reward = float((allocation * deltas).sum())
-            result.regret += self.rho**epoch * (best - reward)
+            best = deltas.max(dim=1).values.double()
+            reward = (allocation * deltas).sum(dim=1).double()
+            regret += self.params.rho**epoch * (best - reward)
 
             # Soft commit time: each epoch counts for its share of the maximum
             # total pairwise learning rate, N (1 - sum a^2) / (N - 1) -- exactly
             # 4a(1-a) at two arms, 1 at uniform, 0 at a vertex. Summed, it is
             # the number of uniform-equivalent epochs of evidence bought.
-            arms = len(deltas)
-            result.precision_time += (
-                arms * (1.0 - float((allocation**2).sum())) / (arms - 1)
+            precision_time += (
+                arms * (1.0 - (allocation**2).sum(dim=1).double()) / (arms - 1)
             )
 
-            top, arm = allocation.max(dim=-1)
-
-            if float(top) >= 1.0 and result.committed is None:
-                result.committed = int(arm)
-                result.committed_at = epoch
+            top, arm = allocation.max(dim=1)
+            crossing = (top >= 1.0) & (committed_at < 0)
+            committed = torch.where(crossing, arm, committed)
+            committed_at = torch.where(crossing, epoch, committed_at)
 
             policy.observe(problem.observe(self, allocation, deltas))
             deltas = problem.advance(self, deltas)
 
-        return result
+        return Batch(
+            delta=start,
+            regret=regret,
+            precision_time=precision_time,
+            final_allocation=allocation,
+            committed=committed,
+            committed_at=committed_at,
+            epochs=self.params.horizon,
+            policy=type(policy).__name__,
+        )
+
+
+def demo() -> None:
+    from importlib import import_module
+
+    from .main import concrete_policies
+
+    params = Params(
+        rho=0.999,
+        horizon=300,
+        sigma=1.0,
+        effect=0.3,
+        effect_std=0.4,
+        size=8,
+        eta=0.02,
+    )
+    reps = 8
+
+    # Paired seeds survive batching: a permuted sub-batch reproduces its
+    # reps' numbers. Bitwise for the closed-form policies at any horizon; the
+    # Pinn nets are float32, whose matmuls round batch-size-dependently, and
+    # a chaotic trajectory amplifies that wobble (measured here: ~3e-7
+    # relative static, ~1e-3 under drift; over thousands of epochs it can
+    # decorrelate entirely -- same policy, same noise, different
+    # micro-realization). The tolerances sit above the wobble and far below
+    # the O(1) any cross-rep stream leakage produces; delta and the commit
+    # fields stay exact, which is what a misaligned cursor breaks first.
+    for name in ("two_arm", "two_arm_drift", "three_arm"):
+        module = import_module(f"pinn.arena.{name}")
+
+        for cls in concrete_policies():
+            if cls.__module__ != module.__name__:
+                continue
+
+            runner = Runner(params, list(range(reps)))
+            batch = runner.run(
+                module, cls.init(params, reps, "cpu"), module.draw_effect(runner)
+            )
+
+            seeds = [5, 2, 7]
+            runner = Runner(params, seeds)
+            sub = runner.run(
+                module, cls.init(params, len(seeds), "cpu"), module.draw_effect(runner)
+            )
+
+            label = cls.__name__
+            assert torch.equal(sub.committed_at, batch.committed_at[seeds]), label
+            assert torch.equal(sub.committed, batch.committed[seeds]), label
+            assert torch.equal(sub.delta, batch.delta[seeds]), label
+            assert torch.allclose(
+                sub.regret, batch.regret[seeds], rtol=1e-2, atol=1e-6
+            ), label
+            assert torch.allclose(
+                sub.precision_time, batch.precision_time[seeds], rtol=1e-2, atol=1e-6
+            ), label
+            assert torch.allclose(
+                sub.final_allocation, batch.final_allocation[seeds], atol=2e-2
+            ), label
+
+        print(f"{name}: sub-batch == full batch, rep for rep")
+
+
+if __name__ == "__main__":
+    demo()

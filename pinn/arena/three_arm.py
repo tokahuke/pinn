@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import torch
 
-from dataclasses import dataclass, field
 from functools import cache
 from pathlib import Path
 from torch import Tensor
@@ -36,30 +35,13 @@ def _champion() -> DimensionlessValueFunction:
 
 def draw_effect(runner: Runner) -> Tensor:
     """
-    The environment's truth: (0, delta_b, delta_c), the challenger effects
-    drawn iid from the study's distribution.
+    The environment's truth: (0, delta_b, delta_c), one row per rep, the
+    challenger effects drawn iid from the study's distribution.
     """
-    return torch.tensor(
-        [
-            0.0,
-            runner.normal(runner.params.effect, runner.params.effect_std),
-            runner.normal(runner.params.effect, runner.params.effect_std),
-        ]
-    )
+    delta_b = runner.normal(runner.params.effect, runner.params.effect_std)
+    delta_c = runner.normal(runner.params.effect, runner.params.effect_std)
 
-
-def _rates(allocation: Tensor, sigma: float) -> tuple[float, float, float]:
-    """
-    The epoch's information matrix G / sigma^2 in contrast coordinates
-    (doc: dT/dt = G, det G = a_a a_b a_c).
-    """
-    a_a, a_b, a_c = (float(a) for a in allocation)
-
-    return (
-        (a_a * a_b + a_b * a_c) / sigma**2,
-        -(a_b * a_c) / sigma**2,
-        (a_a * a_c + a_b * a_c) / sigma**2,
-    )
+    return torch.stack((torch.zeros_like(delta_b), delta_b, delta_c), dim=1).float()
 
 
 def advance(runner: Runner, deltas: Tensor) -> Tensor:
@@ -70,127 +52,146 @@ def advance(runner: Runner, deltas: Tensor) -> Tensor:
     return deltas
 
 
+def _rates(allocation: Tensor, sigma: float) -> tuple[Tensor, Tensor, Tensor]:
+    """
+    The epoch's information matrix G / sigma^2 in contrast coordinates
+    (doc: dT/dt = G, det G = a_a a_b a_c).
+    """
+    a_a, a_b, a_c = (allocation[:, i].double() for i in range(3))
+
+    return (
+        (a_a * a_b + a_b * a_c) / sigma**2,
+        -(a_b * a_c) / sigma**2,
+        (a_a * a_c + a_b * a_c) / sigma**2,
+    )
+
+
 def observe(
     runner: Runner, allocation: Tensor, deltas: Tensor
-) -> tuple[Tensor, float, float, float]:
+) -> tuple[Tensor, Tensor, Tensor, Tensor]:
     """
     One epoch's evidence in information form: dq = G delta + noise with
     noise ~ N(0, G), plus the precision increment G itself -- the natural
     parameters, so no inversion of a possibly singular G is ever needed
     (an edge allocation is rank one, a vertex rank zero).
+
+    A vertex rep buys nothing: it consumes no draws (the mask skips its
+    cursor twice, keeping the stream aligned across batches) and reads zeros.
     """
     g_bb, g_bc, g_cc = _rates(allocation, runner.params.sigma)
-
-    # A vertex buys nothing. Return early rather than drawing two variates and
-    # multiplying them away: the runner no longer stops at a vertex, so those
-    # draws would shift the shared rng stream the seed pairing relies on.
-    if g_bb == 0.0 and g_cc == 0.0:
-        return torch.zeros(2), 0.0, 0.0, 0.0
+    live = ~((g_bb == 0.0) & (g_cc == 0.0))
 
     # Closed-form 2x2 Cholesky of G, guarded for the rank-deficient edges.
-    root_bb = g_bb**0.5
-    root_bc = g_bc / root_bb if root_bb > 0.0 else 0.0
-    root_cc = max(g_cc - root_bc**2, 0.0) ** 0.5
-
-    noise_1 = runner.normal(0.0, 1.0)
-    noise_2 = runner.normal(0.0, 1.0)
-    dq = torch.tensor(
-        [
-            g_bb * float(deltas[1]) + g_bc * float(deltas[2]) + root_bb * noise_1,
-            g_bc * float(deltas[1])
-            + g_cc * float(deltas[2])
-            + root_bc * noise_1
-            + root_cc * noise_2,
-        ]
+    root_bb = g_bb.sqrt()
+    root_bc = torch.where(
+        root_bb > 0.0, g_bc / root_bb.masked_fill(root_bb == 0.0, 1.0), 0.0
     )
+    root_cc = (g_cc - root_bc**2).clamp_min(0.0).sqrt()
+
+    noise_1 = runner.normal(0.0, 1.0, live)
+    noise_2 = runner.normal(0.0, 1.0, live)
+    delta_b, delta_c = deltas[:, 1].double(), deltas[:, 2].double()
+    dq = torch.stack(
+        (
+            g_bb * delta_b + g_bc * delta_c + root_bb * noise_1,
+            g_bc * delta_b + g_cc * delta_c + root_bc * noise_1 + root_cc * noise_2,
+        ),
+        dim=1,
+    ).float()
 
     return dq, g_bb, g_bc, g_cc
 
 
-@dataclass(kw_only=True)
 class Bayesian(Policy):
     """
     Flat-prior posterior on the contrasts, accumulated in natural parameters:
-    posterior precision T (data only) and evidence q, mean = T^-1 q.
+    posterior precision T (data only, (reps,) float64 entries) and evidence
+    q ((reps, 2) float32), mean = T^-1 q.
     """
 
-    params: Params
-    count: int = 0
-    q: Tensor = field(default_factory=lambda: torch.zeros(2))
-    t_bb: float = 0.0
-    t_bc: float = 0.0
-    t_cc: float = 0.0
+    def __init__(self, params: Params, reps: int, device: str) -> None:
+        self.params = params
+        self.count = 0
+        self.q = torch.zeros(reps, 2, device=device)
+        self.t_bb = torch.zeros(reps, dtype=torch.float64, device=device)
+        self.t_bc = torch.zeros(reps, dtype=torch.float64, device=device)
+        self.t_cc = torch.zeros(reps, dtype=torch.float64, device=device)
 
     @classmethod
-    def init(cls, params: Params) -> Self:
-        return cls(params=params)
+    def init(cls, params: Params, reps: int, device: str) -> Self:
+        return cls(params, reps, device)
 
-    def observe(self, observation: tuple[Tensor, float, float, float]) -> None:
+    def observe(self, observation: tuple[Tensor, Tensor, Tensor, Tensor]) -> None:
         dq, g_bb, g_bc, g_cc = observation
 
         self.count += 1
         self.q = self.q + dq
-        self.t_bb += g_bb
-        self.t_bc += g_bc
-        self.t_cc += g_cc
+        self.t_bb = self.t_bb + g_bb
+        self.t_bc = self.t_bc + g_bc
+        self.t_cc = self.t_cc + g_cc
 
     @property
-    def determinant(self) -> float:
+    def determinant(self) -> Tensor:
         return self.t_bb * self.t_cc - self.t_bc**2
 
-    def mean(self) -> tuple[float, float]:
+    def mean(self) -> tuple[Tensor, Tensor]:
         """
         Flat-prior posterior mean of the contrasts; (0, 0) before the data
         precision is invertible.
         """
-        if self.determinant <= 1e-12:
-            return 0.0, 0.0
-
-        q_b, q_c = float(self.q[0]), float(self.q[1])
+        det = self.determinant
+        live = det > 1e-12
+        safe = det.masked_fill(~live, 1.0)
+        q_b, q_c = self.q[:, 0].double(), self.q[:, 1].double()
 
         return (
-            (self.t_cc * q_b - self.t_bc * q_c) / self.determinant,
-            (-self.t_bc * q_b + self.t_bb * q_c) / self.determinant,
+            torch.where(live, (self.t_cc * q_b - self.t_bc * q_c) / safe, 0.0),
+            torch.where(live, (-self.t_bc * q_b + self.t_bb * q_c) / safe, 0.0),
         )
 
 
-def _one_hot(arm: int) -> Tensor:
-    allocation = torch.zeros(3)
-    allocation[arm] = 1.0
-
-    return allocation
+def _one_hot(arm: Tensor) -> Tensor:
+    return torch.eye(3, device=arm.device)[arm]
 
 
-def _commit_arm(m_b: float, m_c: float) -> int:
-    levels = (0.0, m_b, m_c)
+def _commit_arm(m_b: Tensor, m_c: Tensor) -> Tensor:
+    """
+    First-maximal arm of (0, m_b, m_c): strictly-greater wins, ties keep the
+    earlier arm.
+    """
+    arm = torch.zeros_like(m_b, dtype=torch.long)
+    arm = torch.where(m_b > 0.0, 1, arm)
 
-    return max(range(3), key=lambda arm: levels[arm])
+    return torch.where(m_c > torch.maximum(m_b, torch.zeros_like(m_b)), 2, arm)
 
 
-THIRDS = torch.full((3,), 1.0 / 3.0)
+def _thirds(reps: int, device: torch.device) -> Tensor:
+    return torch.full((reps, 3), 1.0 / 3.0, device=device)
 
 
-@dataclass
 class ExploreThenCommit(Bayesian):
     """
     Explore at thirds (the most informative allocation), then commit to the
     posterior leader at a fixed deadline, however uncertain it is by then.
     """
 
-    deadline: int = 50
+    def __init__(self, params: Params, reps: int, device: str, deadline: int) -> None:
+        super().__init__(params, reps, device)
+        self.deadline = deadline
 
     @classmethod
-    def init(cls, params: Params) -> Self:
-        return cls(params=params, deadline=optimal_deadline(params.rho, params.horizon))
+    def init(cls, params: Params, reps: int, device: str) -> Self:
+        return cls(
+            params, reps, device, deadline=optimal_deadline(params.rho, params.horizon)
+        )
 
     def propose(self) -> Tensor:
         if self.count < self.deadline:
-            return THIRDS.clone()
+            return _thirds(len(self.t_bb), self.t_bb.device)
 
         return _one_hot(_commit_arm(*self.mean()))
 
 
-@dataclass
 class ProbabilityMatching(Bayesian):
     """
     Allocate each arm the posterior probability it is best: three-arm
@@ -200,25 +201,25 @@ class ProbabilityMatching(Bayesian):
     """
 
     def propose(self) -> Tensor:
-        if self.determinant <= 1e-12:
-            return THIRDS.clone()
-
+        det = self.determinant
+        live = det > 1e-12
+        safe = det.masked_fill(~live, 1.0)
         m_b, m_c = self.mean()
-        s_bb = self.t_cc / self.determinant
-        s_bc = -self.t_bc / self.determinant
-        s_cc = self.t_bb / self.determinant
+        # Dead rows get the harmless (mean 0, variance 1, covariance 0)
+        # stats; their orthants are computed anyway and discarded below.
+        s_bb = torch.where(live, self.t_cc / safe, 1.0)
+        s_bc = torch.where(live, -self.t_bc / safe, 0.0)
+        s_cc = torch.where(live, self.t_bb / safe, 1.0)
 
         def orthant(
-            mean_x: float, var_x: float, mean_y: float, var_y: float, cov: float
-        ) -> float:
+            mean_x: Tensor, var_x: Tensor, mean_y: Tensor, var_y: Tensor, cov: Tensor
+        ) -> Tensor:
             correlation = cov / (var_x * var_y) ** 0.5
 
-            return float(
-                _bivariate_ndtr(
-                    torch.tensor(mean_x / var_x**0.5),
-                    torch.tensor(mean_y / var_y**0.5),
-                    torch.tensor(max(min(correlation, 0.999), -0.999)),
-                )
+            return _bivariate_ndtr(
+                (mean_x / var_x**0.5).float(),
+                (mean_y / var_y**0.5).float(),
+                correlation.clamp(-0.999, 0.999).float(),
             )
 
         # P(arm best) = P(both its contrasts positive), each an orthant of a
@@ -230,12 +231,15 @@ class ProbabilityMatching(Bayesian):
         win_c = orthant(m_c, s_cc, -gap, var_gap, s_cc - s_bc)
         win_a = orthant(-m_b, s_bb, -m_c, s_cc, s_bc)
 
-        allocation = torch.tensor([win_a, win_b, win_c])
+        wins = torch.stack((win_a, win_b, win_c), dim=1)
 
-        return allocation / allocation.sum()
+        return torch.where(
+            live.unsqueeze(1),
+            wins / wins.sum(dim=1, keepdim=True),
+            _thirds(len(det), det.device),
+        )
 
 
-@dataclass
 class Elimination(Bayesian):
     """
     Successive elimination, the z-test's three-arm analog (ported from the
@@ -248,33 +252,38 @@ class Elimination(Bayesian):
     p_value: float = 0.05
 
     def propose(self) -> Tensor:
-        if self.determinant <= 1e-12 or self.t_bb <= 1e-9 or self.t_cc <= 1e-9:
-            return THIRDS.clone()
+        det = self.determinant
+        live = (det > 1e-12) & (self.t_bb > 1e-9) & (self.t_cc > 1e-9)
+        safe = det.masked_fill(~live, 1.0)
 
         threshold = float(torch.special.ndtri(torch.tensor(1.0 - self.p_value / 2.0)))
         m_b, m_c = self.mean()
-        s_bb = self.t_cc / self.determinant
-        s_bc = -self.t_bc / self.determinant
-        s_cc = self.t_bb / self.determinant
+        s_bb = torch.where(live, self.t_cc / safe, 1.0)
+        s_bc = torch.where(live, -self.t_bc / safe, 0.0)
+        s_cc = torch.where(live, self.t_bb / safe, 1.0)
 
         z_b = m_b / s_bb**0.5
         z_c = m_c / s_cc**0.5
-        z_bc = (m_b - m_c) / max(s_bb + s_cc - 2.0 * s_bc, 1e-12) ** 0.5
+        z_bc = (m_b - m_c) / (s_bb + s_cc - 2.0 * s_bc).clamp_min(1e-12) ** 0.5
 
-        out_a = z_b > threshold or z_c > threshold
-        out_b = z_b < -threshold or z_bc < -threshold
-        out_c = z_c < -threshold or z_bc > threshold
-        survivors = torch.tensor([not out_a, not out_b, not out_c]).float()
+        out_a = (z_b > threshold) | (z_c > threshold)
+        out_b = (z_b < -threshold) | (z_bc < -threshold)
+        out_c = (z_c < -threshold) | (z_bc > threshold)
+        survivors = (~torch.stack((out_a, out_b, out_c), dim=1)).float()
 
         # Cyclic eliminations can in principle empty the set; fall back to
         # the posterior leader.
-        if float(survivors.sum()) < 0.5:
-            return _one_hot(_commit_arm(m_b, m_c))
+        count = survivors.sum(dim=1)
+        empty = count < 0.5
+        allocation = torch.where(
+            empty.unsqueeze(1),
+            _one_hot(_commit_arm(m_b, m_c)),
+            survivors / count.masked_fill(empty, 1.0).unsqueeze(1),
+        )
 
-        return survivors / survivors.sum()
+        return torch.where(live.unsqueeze(1), allocation, _thirds(len(det), det.device))
 
 
-@dataclass
 class Pinn(Bayesian):
     """
     The trained three_arm HJB policy, mapped onto arena units with rate
@@ -286,15 +295,23 @@ class Pinn(Bayesian):
     the flattest prior the checkpoint supports, computed per environment.
     """
 
-    prior_std: float | None = None
-    value: ValueFunction | None = None
+    def __init__(
+        self,
+        params: Params,
+        reps: int,
+        device: str,
+        prior_std: float | None = None,
+    ) -> None:
+        super().__init__(params, reps, device)
+        self.prior_std = prior_std
+        self.value: ValueFunction | None = None
 
     @classmethod
-    def init(cls, params: Params) -> Self:
-        policy = cls(params=params)
+    def init(cls, params: Params, reps: int, device: str) -> Self:
+        policy = cls(params, reps, device)
         policy.value = ValueFunction(
             _champion(), rho=1.0 - params.rho, sigma=params.sigma
-        )
+        ).to(device)
 
         return policy
 
@@ -312,39 +329,39 @@ class Pinn(Bayesian):
         tau_bc = -prior / 2.0 + self.t_bc
         tau_cc = prior + self.t_cc
         det = tau_bb * tau_cc - tau_bc**2
-        q_b, q_c = float(self.q[0]), float(self.q[1])
+        q_b, q_c = self.q[:, 0].double(), self.q[:, 1].double()
         m_b = (tau_cc * q_b - tau_bc * q_c) / det
         m_c = (-tau_bc * q_b + tau_bb * q_c) / det
 
-        allocation = self.value.policy(
-            torch.tensor([m_b]),
-            torch.tensor([m_c]),
-            torch.tensor([tau_bb]),
-            torch.tensor([tau_bc]),
-            torch.tensor([tau_cc]),
+        return self.value.policy(
+            m_b.float(), m_c.float(), tau_bb.float(), tau_bc.float(), tau_cc.float()
         )
-
-        return allocation.squeeze(0)
 
 
 def demo() -> None:
     import pinn.arena.three_arm as problem
 
-    runner = Runner(
-        Params(rho=0.999, horizon=500, sigma=1.0, effect=0.0, effect_std=0.3, size=1)
+    from .harness import Run
+
+    params = Params(
+        rho=0.999, horizon=500, sigma=1.0, effect=0.0, effect_std=0.3, size=1
     )
-    b_wins = torch.tensor([0.0, 0.6, -0.2])
-    null = torch.zeros(3)
+    b_wins = torch.tensor([[0.0, 0.6, -0.2]])
+
+    def play(cls: type[Policy], deltas: Tensor) -> Run:
+        runner = Runner(params, [0])
+
+        return runner.run(problem, cls.init(params, 1, "cpu"), deltas).runs()[0]
 
     # A clear winner: matching concentrates on it; the null pays no regret.
-    matching = runner.run(problem, ProbabilityMatching.init(runner.params), b_wins)
+    matching = play(ProbabilityMatching, b_wins)
     assert matching.final_allocation[1] > 0.9, matching.final_allocation
 
-    nothing = runner.run(problem, ProbabilityMatching.init(runner.params), null)
+    nothing = play(ProbabilityMatching, torch.zeros(1, 3))
     assert abs(nothing.regret) < 1e-9, nothing.regret
 
     # The committers commit to the winner.
-    etc = runner.run(problem, ExploreThenCommit.init(runner.params), b_wins)
+    etc = play(ExploreThenCommit, b_wins)
     assert etc.committed == 1, etc.committed
 
     # Soft commit time reduces to the deadline: thirds is the uniform
@@ -352,14 +369,14 @@ def demo() -> None:
     # buys nothing.
     assert abs(etc.precision_time - etc.committed_at) < 1e-3, etc.precision_time
 
-    elimination = runner.run(problem, Elimination.init(runner.params), b_wins)
+    elimination = play(Elimination, b_wins)
     assert elimination.committed == 1, elimination.committed
 
     # The PINN: opens near thirds on no evidence, commits to the winner.
-    pinn_policy = Pinn.init(runner.params)
+    pinn_policy = Pinn.init(params, 1, "cpu")
     assert float(pinn_policy.propose().min()) > 0.2, pinn_policy.propose()
 
-    pinn = runner.run(problem, pinn_policy, b_wins)
+    pinn = play(Pinn, b_wins)
     assert pinn.committed == 1, (pinn.committed, pinn.final_allocation)
 
     print(f"matching regret {matching.regret:.2f}, final {matching.final_allocation}")

@@ -24,15 +24,14 @@ from __future__ import annotations
 
 import torch
 
-from dataclasses import dataclass
 from functools import cache, cached_property
-from math import erfc, sqrt
+from math import sqrt
 from pathlib import Path
 from torch import Tensor
 from typing import Self
 
 from ..problems.two_arm_drift import DimensionlessValueFunction, ValueFunction
-from .harness import Params, Policy, Runner, optimal_deadline
+from .harness import Params, Policy, Run, Runner, optimal_deadline
 
 CHECKPOINT = Path("data") / "two_arm_drift.pt"
 
@@ -54,11 +53,11 @@ def _champion() -> DimensionlessValueFunction:
 
 def draw_effect(runner: Runner) -> Tensor:
     """
-    The environment's truth at epoch 0: (0, delta).
+    The environment's truth at epoch 0: (0, delta), one row per rep.
     """
     delta = runner.normal(runner.params.effect, runner.params.effect_std)
 
-    return torch.tensor([0.0, delta])
+    return torch.stack((torch.zeros_like(delta), delta), dim=1).float()
 
 
 def advance(runner: Runner, deltas: Tensor) -> Tensor:
@@ -73,10 +72,14 @@ def advance(runner: Runner, deltas: Tensor) -> Tensor:
     """
     drift = runner.normal(0.0, runner.params.eta)
 
-    return torch.tensor([0.0, float(deltas[1]) + drift])
+    return torch.stack(
+        (torch.zeros_like(drift), deltas[:, 1].double() + drift), dim=1
+    ).float()
 
 
-def observe(runner: Runner, allocation: Tensor, deltas: Tensor) -> tuple[float, float]:
+def observe(
+    runner: Runner, allocation: Tensor, deltas: Tensor
+) -> tuple[Tensor, Tensor]:
     """
     One epoch's evidence: the noisy contrast estimate, and the DESIGN
     alpha_0 alpha_1 that bought it.
@@ -88,22 +91,25 @@ def observe(runner: Runner, allocation: Tensor, deltas: Tensor) -> tuple[float, 
     bought and a draw at the true noise; the policy supplies the scale it
     thinks that noise has.
 
-    A vertex buys nothing, and the runner no longer stops there, so that case
-    returns zero design and a value the precision-weighted update multiplies
+    A vertex rep buys nothing: it consumes no draw (the mask skips its
+    cursor) and reads (0, 0), which the precision-weighted update multiplies
     away.
     """
-    design = float(allocation[0] * allocation[1])
+    design = (allocation[:, 0] * allocation[:, 1]).double()
+    live = design > 0.0
+    deviation = runner.params.sigma / design.masked_fill(~live, 1.0).sqrt()
 
-    if design == 0.0:
-        return 0.0, 0.0
-
-    return runner.normal(float(deltas[1]), runner.params.sigma / sqrt(design)), design
+    return runner.normal(deltas[:, 1].double(), deviation, live), design
 
 
-@dataclass(kw_only=True)
+def _split(treatment: Tensor) -> Tensor:
+    return torch.stack((1.0 - treatment, treatment), dim=1).float()
+
+
 class Filter(Policy):
     """
-    Kalman posterior on a drifting contrast, carried as (mean, precision).
+    Kalman posterior on a drifting contrast, carried as (mean, precision),
+    both (reps,) float64.
 
     Not two_arm's running sums: those are sufficient statistics only under a
     flat prior with perfect memory, and drift forgets. The recursion is
@@ -113,18 +119,21 @@ class Filter(Policy):
     construct directly to misspecify either.
     """
 
-    params: Params
-    sigma: float
-    eta: float
-    count: int = 0
-    mean: float = 0.0
-    precision: float = 0.0
+    def __init__(
+        self, params: Params, reps: int, device: str, sigma: float, eta: float
+    ) -> None:
+        self.params = params
+        self.sigma = sigma
+        self.eta = eta
+        self.count = 0
+        self.mean = torch.zeros(reps, dtype=torch.float64, device=device)
+        self.precision = torch.zeros(reps, dtype=torch.float64, device=device)
 
     @classmethod
-    def init(cls, params: Params) -> Self:
-        return cls(params=params, sigma=params.sigma, eta=params.eta)
+    def init(cls, params: Params, reps: int, device: str) -> Self:
+        return cls(params, reps, device, sigma=params.sigma, eta=params.eta)
 
-    def observe(self, observation: tuple[float, float]) -> None:
+    def observe(self, observation: tuple[Tensor, Tensor]) -> None:
         estimate, design = observation
         self.count += 1
 
@@ -136,27 +145,26 @@ class Filter(Policy):
         gained = design / self.sigma**2
         total = self.precision + gained
 
-        if total > 0.0:
-            self.mean = (self.mean * self.precision + estimate * gained) / total
+        self.mean = torch.where(
+            total > 0.0,
+            (self.mean * self.precision + estimate * gained)
+            / total.masked_fill(total == 0.0, 1.0),
+            self.mean,
+        )
         self.precision = total
 
     @property
-    def z(self) -> float:
-        return self.mean * sqrt(self.precision)
+    def z(self) -> Tensor:
+        return self.mean * self.precision.sqrt()
 
     @property
-    def prob_positive(self) -> float:
+    def prob_positive(self) -> Tensor:
         """
-        P(delta > 0) under the posterior, via stdlib erfc: it runs every epoch.
+        P(delta > 0) under the posterior.
         """
-        return 0.5 * erfc(-self.z / sqrt(2.0))
+        return 0.5 * torch.special.erfc(-self.z / sqrt(2.0))
 
 
-def _split(treatment: float) -> Tensor:
-    return torch.tensor([1.0 - treatment, treatment])
-
-
-@dataclass(kw_only=True)
 class ExploreThenCommit(Filter):
     """
     Explore at the most informative allocation, then commit on the sign of the
@@ -165,12 +173,24 @@ class ExploreThenCommit(Filter):
     drift-aware entrants should exploit.
     """
 
-    deadline: int = 50
+    def __init__(
+        self,
+        params: Params,
+        reps: int,
+        device: str,
+        sigma: float,
+        eta: float,
+        deadline: int,
+    ) -> None:
+        super().__init__(params, reps, device, sigma, eta)
+        self.deadline = deadline
 
     @classmethod
-    def init(cls, params: Params) -> Self:
+    def init(cls, params: Params, reps: int, device: str) -> Self:
         return cls(
-            params=params,
+            params,
+            reps,
+            device,
             sigma=params.sigma,
             eta=params.eta,
             deadline=optimal_deadline(params.rho, params.horizon),
@@ -178,12 +198,11 @@ class ExploreThenCommit(Filter):
 
     def propose(self) -> Tensor:
         if self.count < self.deadline:
-            return _split(0.5)
+            return _split(torch.full_like(self.mean, 0.5))
 
-        return _split(1.0 if self.mean > 0.0 else 0.0)
+        return _split((self.mean > 0.0).double())
 
 
-@dataclass(kw_only=True)
 class ProbabilityMatching(Filter):
     """
     Allocate the posterior probability that treatment wins: Thompson sampling
@@ -196,7 +215,6 @@ class ProbabilityMatching(Filter):
         return _split(self.prob_positive)
 
 
-@dataclass(kw_only=True)
 class ZTest(Filter):
     """
     Explore at 50/50 while the null holds, commit to the detected side once it
@@ -211,13 +229,11 @@ class ZTest(Filter):
         return float(torch.special.ndtri(torch.tensor(1.0 - self.p_value / 2.0)))
 
     def propose(self) -> Tensor:
-        if abs(self.z) < self.threshold:
-            return _split(0.5)
+        commit = (self.z > 0.0).double()
 
-        return _split(1.0 if self.z > 0.0 else 0.0)
+        return _split(torch.where(self.z.abs() < self.threshold, 0.5, commit))
 
 
-@dataclass(kw_only=True)
 class Pinn(Filter):
     """
     The trained drift HJB policy, mapped onto arena units with rate
@@ -225,23 +241,21 @@ class Pinn(Filter):
 
     Its etahat is the POLICY's eta, so one checkpoint plays every column of the
     misspecification grid -- that is what carrying etahat as a net input buys.
-
-    The prior is folded INTO the filter: the belief starts at (0, prior_tau)
-    and erosion acts on it like any other precision, so the mean the net sees
-    is properly shrunk. At eta = 0 this reduces exactly to two_arm's conjugate
-    entrant. The earlier flat start floored only the tau INPUT while handing
-    the net the raw mean -- almost pure noise for the first ~1/(floor eta...)
-    epochs but dressed as evidence -- and the policy committed on the noise's
-    decay timescale instead of an evidence timescale (drift_grid 2026-08-09:
-    precision time 145 vs 296, wrong commits 2x, the whole drift-column
-    deficit).
     """
 
-    prior_std: float | None = None
-    value: ValueFunction | None = None
-
-    def __post_init__(self) -> None:
-        self.precision = self.prior_tau
+    def __init__(
+        self,
+        params: Params,
+        reps: int,
+        device: str,
+        sigma: float,
+        eta: float,
+        prior_std: float | None = None,
+    ) -> None:
+        super().__init__(params, reps, device, sigma, eta)
+        self.prior_std = prior_std
+        self.value: ValueFunction | None = None
+        self.precision = torch.full_like(self.precision, self.prior_tau)
 
     @property
     def prior_tau(self) -> float:
@@ -251,14 +265,14 @@ class Pinn(Filter):
         return _FLATTEST_TAUHAT / ((1.0 - self.params.rho) * self.sigma**2)
 
     @classmethod
-    def init(cls, params: Params) -> Self:
-        policy = cls(params=params, sigma=params.sigma, eta=params.eta)
+    def init(cls, params: Params, reps: int, device: str) -> Self:
+        policy = cls(params, reps, device, sigma=params.sigma, eta=params.eta)
         policy.value = ValueFunction(
             _champion(),
             rho=1.0 - params.rho,
             sigma=policy.sigma,
             eta=policy.eta,
-        )
+        ).to(device)
 
         return policy
 
@@ -266,65 +280,72 @@ class Pinn(Filter):
         # The trust guard on the net INPUT only: erosion can pull the eroded
         # prior below the flattest tauhat the checkpoint supports.
         floor = _FLATTEST_TAUHAT / ((1.0 - self.params.rho) * self.sigma**2)
-        tau = max(self.precision, floor)
+        tau = self.precision.clamp_min(floor)
 
-        return _split(
-            float(self.value.policy(torch.tensor([self.mean]), torch.tensor([tau])))
-        )
+        return _split(self.value.policy(self.mean.float(), tau.float()).double())
 
 
 def demo() -> None:
     import pinn.arena.two_arm_drift as problem
 
-    static = Runner(
-        Params(rho=0.999, horizon=500, sigma=1.0, effect=0.5, effect_std=0.0, size=1)
+    static = Params(
+        rho=0.999, horizon=500, sigma=1.0, effect=0.5, effect_std=0.0, size=1
     )
-    winner = torch.tensor([0.0, 0.5])
+    winner = torch.tensor([[0.0, 0.5]])
+
+    def play(cls: type[Policy], deltas: Tensor) -> Run:
+        runner = Runner(static, [0])
+
+        return runner.run(problem, cls.init(static, 1, "cpu"), deltas).runs()[0]
 
     # eta = 0 everywhere: the filter is two_arm's accumulator, and every
     # policy behaves as it does there.
-    matching = static.run(problem, ProbabilityMatching.init(static.params), winner)
+    matching = play(ProbabilityMatching, winner)
     assert matching.final_allocation[1] > 0.95, matching.final_allocation
 
-    null = static.run(problem, ProbabilityMatching.init(static.params), torch.zeros(2))
+    null = play(ProbabilityMatching, torch.zeros(1, 2))
     assert abs(null.regret) < 1e-9, null.regret
 
-    etc = static.run(problem, ExploreThenCommit.init(static.params), winner)
+    etc = play(ExploreThenCommit, winner)
     assert etc.committed == 1, etc.committed
-    assert etc.committed_at == ExploreThenCommit.init(static.params).deadline
+    assert etc.committed_at == ExploreThenCommit.init(static, 1, "cpu").deadline
     assert abs(etc.precision_time - etc.committed_at) < 1e-6, etc.precision_time
 
     # Drift: the truth moves, so the effect at the end is not the effect at
     # the start, and the oracle moves with it.
-    drifting = Runner(
-        Params(
-            rho=0.999,
-            horizon=500,
-            sigma=1.0,
-            effect=0.5,
-            effect_std=0.0,
-            size=1,
-            eta=0.05,
-        )
+    drifting = Params(
+        rho=0.999,
+        horizon=500,
+        sigma=1.0,
+        effect=0.5,
+        effect_std=0.0,
+        size=1,
+        eta=0.05,
     )
-    walked = problem.draw_effect(drifting)
+    runner = Runner(drifting, [0])
+    walked = problem.draw_effect(runner)
     for _ in range(500):
-        walked = problem.advance(drifting, walked)
+        walked = problem.advance(runner, walked)
 
-    assert float(walked[0]) == 0.0, walked
-    assert abs(float(walked[1]) - 0.5) > 1e-3, walked
+    assert float(walked[0, 0]) == 0.0, walked
+    assert abs(float(walked[0, 1]) - 0.5) > 1e-3, walked
 
     # A drift-aware filter stops sharpening: its precision saturates at the
     # ceiling instead of growing without bound, which is the whole difference.
-    aware = ProbabilityMatching.init(drifting.params)
-    blind = ProbabilityMatching(params=drifting.params, sigma=1.0, eta=0.0)
+    aware = ProbabilityMatching.init(drifting, 1, "cpu")
+    blind = ProbabilityMatching(drifting, 1, "cpu", sigma=1.0, eta=0.0)
 
+    evidence = (
+        torch.full((1,), 0.5, dtype=torch.float64),
+        torch.full((1,), 0.25, dtype=torch.float64),
+    )
     for _ in range(400):
-        evidence = (0.5, 0.25)
         aware.observe(evidence)
         blind.observe(evidence)
 
-    assert blind.precision > 5.0 * aware.precision, (blind.precision, aware.precision)
+    aware_precision = float(aware.precision[0])
+    blind_precision = float(blind.precision[0])
+    assert blind_precision > 5.0 * aware_precision, (blind_precision, aware_precision)
 
     # It converges to the recursion's own fixed point: tau = tau/(1 + eta^2 tau)
     # + p solves to p/2 + sqrt(p^2/4 + p/eta^2). That sits just ABOVE the
@@ -334,7 +355,7 @@ def demo() -> None:
     gained, drift = 0.25, 0.05
     fixed_point = gained / 2.0 + sqrt(gained**2 / 4.0 + gained / drift**2)
 
-    assert abs(aware.precision - fixed_point) < 1e-6, (aware.precision, fixed_point)
+    assert abs(aware_precision - fixed_point) < 1e-6, (aware_precision, fixed_point)
     assert fixed_point > 1.0 / (2.0 * 1.0 * drift)
 
     # The prior fold: at eta = 0 the Pinn filter carries exactly two_arm's
@@ -344,24 +365,30 @@ def demo() -> None:
 
     assert TWO_ARM_FLATTEST == _FLATTEST_TAUHAT
 
-    drift_pinn = Pinn(params=static.params, sigma=1.0, eta=0.0)
-    conjugate = TwoArmPinn(params=static.params)
+    drift_pinn = Pinn(static, 1, "cpu", sigma=1.0, eta=0.0)
+    conjugate = TwoArmPinn(static, 1, "cpu")
 
     for estimate in (0.8, -0.3, 1.4, 0.1):
-        drift_pinn.observe((estimate, 0.25))
-        conjugate.observe((estimate, 0.25))
+        pair = (
+            torch.full((1,), estimate, dtype=torch.float64),
+            torch.full((1,), 0.25, dtype=torch.float64),
+        )
+        drift_pinn.observe(pair)
+        conjugate.observe(pair)
 
-    prior_tau = _FLATTEST_TAUHAT / (1.0 - static.params.rho)
-    total_tau = prior_tau + conjugate.total_precision
+    prior_tau = _FLATTEST_TAUHAT / (1.0 - static.rho)
+    total_tau = prior_tau + float(conjugate.total_precision[0])
 
-    assert abs(drift_pinn.precision - total_tau) < 1e-12
-    assert abs(drift_pinn.mean - conjugate.total / total_tau) < 1e-12
+    assert abs(float(drift_pinn.precision[0]) - total_tau) < 1e-12
+    assert (
+        abs(float(drift_pinn.mean[0]) - float(conjugate.total[0]) / total_tau) < 1e-12
+    )
 
     print(f"matching regret {matching.regret:.2f}, final a {matching.final_allocation}")
     print(f"etc regret {etc.regret:.2f}, committed at epoch {etc.committed_at}")
-    print(f"drifted effect after 500 epochs: {float(walked[1]):.3f} (started 0.500)")
+    print(f"drifted effect after 500 epochs: {float(walked[0, 1]):.3f} (started 0.500)")
     print(
-        f"precision after 400 epochs: aware {aware.precision:.2f}, blind {blind.precision:.2f}"
+        f"precision after 400 epochs: aware {aware_precision:.2f}, blind {blind_precision:.2f}"
     )
 
 

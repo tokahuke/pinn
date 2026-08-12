@@ -105,6 +105,30 @@ def ssh_flags(port: int) -> list[str]:
     ]
 
 
+def sync_repo(address: str, port: int) -> None:
+    """The working tree onto the pod. data/ stays here: it holds the champions."""
+    shell(
+        [
+            "rsync",
+            "-az",
+            "--delete",
+            "-e",
+            f"ssh {' '.join(ssh_flags(port))}",
+            "--exclude",
+            ".git",
+            "--exclude",
+            "data",
+            "--exclude",
+            ".venv",
+            "--exclude",
+            "__pycache__",
+            "./",
+            f"root@{address}:{REMOTE}/",
+        ],
+        "rsync",
+    )
+
+
 def shell(command: list[str], what: str, fatal: bool = True) -> int:
     done = subprocess.run(command, text=True)
 

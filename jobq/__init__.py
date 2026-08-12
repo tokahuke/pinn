@@ -9,6 +9,7 @@ import click
 from .cp import cp
 from .down import down
 from .run import run
+from .sync import sync
 from .up import up
 
 
@@ -21,5 +22,6 @@ def cli() -> None:
 
 cli.add_command(up)
 cli.add_command(cp)
+cli.add_command(sync)
 cli.add_command(run)
 cli.add_command(down)

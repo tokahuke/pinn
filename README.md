@@ -16,12 +16,14 @@ Yes, it even beats Thompson Sampling for a simple AB test. Oh! If you have been 
 
 | policy | regret (Thompson = 1.00) | wrong commits | commits | evidence (Thompson = 1.00) |
 |---|---|---|---|---|
-| PINN (this repo) | **0.80** | 6.6% | 99.2% | **0.46** |
+| PINN (this repo) | **0.79** | 5.6% | 98.6% | **0.57** |
 | Thompson sampling | 1.00 | 0.0% | never | 1.00 |
-| explore-then-commit | 1.65 | 13.0% | 100% | 0.33 |
-| z-test at 5% | 1.81 | 10.7% | 93.7% | 0.67 |
+| explore-then-commit | 1.62 | 13.6% | 100% | 0.32 |
+| z-test at 5% | 1.92 | 10.6% | 93.0% | 0.70 |
 
-Slightly better than TS in terms of "gains left on the table" (regret) and with the added benefit that _it actually stops_. It also needs to explore less in total. TS, even though it can deliver the goods, is known to be quite the over-curious explorer and the neural network fixes that. Full tables, including the three-arm arena, live in [kb/arena_results.md](kb/arena_results.md).
+Better than TS in terms of "gains left on the table" (regret) and with the added benefit that _it actually stops_. It also needs to explore less in total: TS, even though it can deliver the goods, is known to be quite the over-curious explorer and the neural network fixes that — it knows when measuring stops paying. That is the whole trick, and it is why the margin over every other policy grows with the number of arms.
+
+The net doing this has **402 parameters**. Full tables, including the three-arm arena, live in [kb/arena_results.md](kb/arena_results.md).
 
 ## Beyond just AB
 

@@ -107,12 +107,6 @@ def arena(
         ("ExploreThenCommit", "explore-then-commit", AQUA),
         ("ZTest", "z-test at 5%", YELLOW),
     ]
-    caption = caption or (
-        "Each strategy plays the same 4,000 random A/B tests. Regret: profit left on the table vs an oracle that picks the\n"
-        "winner from day one (lower is better). Evidence: total measurement bought - an even split measures at full power,\n"
-        "sending everyone to one arm measures nothing, and the sum counts perfect-split epochs' worth of data collected.\n"
-        "The PINN loses 20% less than Thompson sampling on less than half the evidence - it knows when measuring stops paying."
-    )
     study = pickle.loads(open(study_path, "rb").read())
     by_policy: dict[str, list] = {}
 
@@ -132,6 +126,21 @@ def arena(
     ts_info, _ = stats(
         "ProbabilityMatching", lambda r: getattr(r, "precision_time", 0.0)
     )
+
+    # Every number in the caption is COMPUTED from this study. A hardcoded one
+    # goes stale the first time the sweep is re-run and nothing catches it: the
+    # 2026-08-13 redraw still claimed "4,000 tests" and "less than half the
+    # evidence" against a 6,000-rep run measuring 0.57. Interpretation belongs
+    # in the README, not here -- one legend, not two.
+    if caption is None:
+        pinn_regret, _ = stats("Pinn", lambda r: r.regret)
+        pinn_info, _ = stats("Pinn", lambda r: getattr(r, "precision_time", 0.0))
+        caption = (
+            f"Each strategy plays the same {len(by_policy['Pinn']):,} random tests. Regret: profit left on the table vs an oracle that\n"
+            "picks the winner from day one (lower is better). Evidence: total measurement bought - an even split measures at\n"
+            "full power, sending everyone to one arm measures nothing, and the sum counts perfect-split epochs of data.\n"
+            f"The PINN loses {1 - pinn_regret / ts_regret:.0%} less than Thompson sampling on {pinn_info / ts_info:.0%} of the evidence."
+        )
 
     fig, (ax_regret, ax_info) = plt.subplots(1, 2, figsize=(12, 3.6))
 
@@ -199,12 +208,6 @@ def arena_three() -> None:
             ("Elimination", "elimination at 5%\n(generalized z-test)", YELLOW),
             ("ExploreThenCommit", "explore-then-commit", AQUA),
         ],
-        caption=(
-            "Each strategy plays the same 4,000 random A/B/C tests (two challengers vs a control). Regret: profit left on\n"
-            "the table vs an oracle that picks the winner from day one (lower is better). Evidence: total measurement\n"
-            "bought, in perfect-thirds epochs. The PINN loses 22% less than Thompson sampling on 38% of the evidence -\n"
-            "the margin over every other policy grows with the number of arms."
-        ),
         xlim=2.8,
     )
 
@@ -254,14 +257,6 @@ def arena_drift() -> None:
             ("ProbabilityMatching", "Thompson sampling", ORANGE),
             ("TS-aware", "Thompson, drift-aware\n(forgetful posterior)", YELLOW),
         ],
-        caption=(
-            "Each strategy plays the same 500 random A/B tests in a world whose true effect never stops wandering.\n"
-            "Regret: profit left on the table vs an oracle that follows the MOVING winner (lower is better). Evidence:\n"
-            "total measurement bought, in perfect-split epochs. The static-world PINN transplanted unchanged still edges\n"
-            "out Thompson; the drift net at its no-drift setting matches them; telling it the truth makes it explore least\n"
-            "and lose most. Awareness of drift is not yet paying for itself - the drift-regime slice of the solve is the\n"
-            "open frontier, not the machinery around it."
-        ),
         xlim=2.2,
     )
 

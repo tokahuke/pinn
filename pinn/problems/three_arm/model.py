@@ -109,9 +109,21 @@ class ExplorationPremium(DeclaresTopology):
             .clamp_min(1e-3)
         )
 
-    def _load_from_state_dict(self, state_dict: dict, prefix: str, *rest) -> None:
-        # Stitching: checkpoints from before the kink branch load with the
-        # branch at its zero-output init, functionally identical.
+    def stitch(self, source: dict) -> None:
+        """
+        Adopt a smooth premium's parameters into this (possibly kinked) net.
+
+        A source without a kink branch keeps this net's zero-init one, so the
+        graft is bit-exact at step 0 and training resumes from the source's
+        function. Anything else missing is a real mismatch and fails loudly.
+
+        Explicit, like both drift siblings. It used to happen implicitly inside
+        _load_from_state_dict, which meant every load silently tolerated absent
+        kink keys -- including the ones that were absent by accident.
+        """
+        state = dict(source)
+        mine = self.state_dict()
+
         if self.kinks > 0:
             for name in (
                 "kink_in.weight",
@@ -119,10 +131,8 @@ class ExplorationPremium(DeclaresTopology):
                 "kink_out.weight",
                 "kink_out.bias",
             ):
-                module, _, attribute = name.partition(".")
-                tensor = getattr(getattr(self, module), attribute)
-                state_dict.setdefault(prefix + name, tensor.detach().clone())
-        super()._load_from_state_dict(state_dict, prefix, *rest)
+                state.setdefault(name, mine[name])
+        self.load_state_dict(state)
 
     def _features(
         self, m_b: Tensor, m_c: Tensor, tau_bb: Tensor, tau_bc: Tensor, tau_cc: Tensor
@@ -424,12 +434,14 @@ def init_model(
         hidden, kinks = parse_topology(topology)
         value = DimensionlessValueFunction(ExplorationPremium(hidden, kinks=kinks))
 
-        # Both: topology is the TARGET shape, state the source adapted into
-        # it -- how a kink branch is grafted onto a trained smooth net
-        # (_load_from_state_dict defaults the missing kink keys to their
-        # zero-output init, so the graft is bit-exact at step 0).
+        # Both: topology is the TARGET shape, state the source adapted into it
+        # -- how a kink branch is grafted onto a trained smooth net. stitch
+        # keeps this net's zero-init branch, so the graft is bit-exact at
+        # step 0.
         if state is not None:
-            value.load_state_dict(state)
+            value.premium.stitch(
+                {k.removeprefix("premium."): v for k, v in state.items()}
+            )
 
         return value
 
@@ -475,7 +487,7 @@ if __name__ == "__main__":
     # kinked net is the same function -- the zero-init output layer keeps the
     # branch silent -- and the branch's parameters are trainable.
     stitched = ExplorationPremium([32, 16], kinks=8)
-    stitched.load_state_dict(premium.state_dict())
+    stitched.stitch(premium.state_dict())
 
     assert torch.allclose(stitched(*state), u)
     assert stitched.kink_out.weight.requires_grad

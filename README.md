@@ -75,20 +75,15 @@ A quick map of the repo, for the curious:
   written, `jobq down` fetches everything and destroys the pod. Entirely
   optional — nothing in the repo needs it.
 
-Trained models are published on the
-[latest release](https://github.com/tokahuke/pinn/releases/latest). The
-release predates the current naming convention, so rename as you download —
-every command and snippet here looks for these two paths:
+Trained checkpoints are not published: they moved faster than any release
+could track, and the ones that were up became unloadable when checkpoints
+started declaring their own architecture. Train your own — the Quickstart
+below does it from scratch — or ask.
 
-| release asset | save as |
-|---|---|
-| `value_2a_32x512.pt` | `data/two_arm.pt` |
-| `value_3a_64x64x64.pt` | `data/three_arm.pt` |
-
-The other assets are archival: the drifting-world nets (`value_2ad_`,
-`value_3ad_`), a legacy two-arm architecture, and a 16-kink three-arm
-experiment that lost to the 8-kink one. Everything else in this repo exists
-to train, test, and beat those two files.
+Checkpoints live in the gitignored `data/`, named `<problem>.<topology>.pt`,
+with the bare `<problem>.pt` a symlink at whichever currently wins. So
+`ls -l data/` reads as a leaderboard, and promoting a challenger is one
+`ln -sf` that every command and snippet here picks up.
 
 ## Quickstart
 

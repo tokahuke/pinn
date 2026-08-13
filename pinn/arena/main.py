@@ -178,6 +178,52 @@ def analyze(runs: Path) -> None:
             f" {info:>9.1f} +/-{info_ci:<4.1f}"
         )
 
+    _paired(by_policy, mean_ci)
+
+
+def _paired(by_policy: dict[str, list[Run]], mean_ci) -> None:
+    """
+    The same comparison, paired by rep.
+
+    Every policy plays the SAME drawn effects and the same noise, so the
+    difference in regret on one rep cancels the environment -- which is nearly
+    all of the variance. Comparing the unpaired means throws that away and
+    reports a confidence interval dominated by how hard the draws were, not by
+    how the policies differ.
+
+    Prints what the pairing costs to buy: the reps needed for a 2-sigma read on
+    a 2% effect, which is how the NEXT sweep should be sized. Sizing from the
+    unpaired spread is how a 50k sweep gets run to resolve something a few
+    thousand paired reps would have settled.
+    """
+    ranked = sorted(
+        by_policy.items(), key=lambda item: mean_ci([r.regret for r in item[1]])[0]
+    )
+    best_name, best_runs = ranked[0]
+
+    print(f"\npaired against {best_name}, per rep (same effects, same noise)")
+    print(
+        f"{'policy':<22} {'difference':>12} {'95% CI':>9} {'unpaired CI':>12} {'reps for 2%':>12}"
+    )
+
+    for name, runs_ in ranked[1:]:
+        # Identical draws are the whole premise; if the reps do not line up,
+        # say so rather than quietly differencing unrelated runs.
+        if len(runs_) != len(best_runs) or any(
+            a.delta != b.delta for a, b in zip(runs_, best_runs)
+        ):
+            print(f"{name:<22} {'reps do not align -- not paired':>50}")
+            continue
+
+        gaps = [a.regret - b.regret for a, b in zip(runs_, best_runs)]
+        mean, ci = mean_ci(gaps)
+        _, loose = mean_ci([r.regret for r in runs_])
+        deviation = ci / 1.96 * len(gaps) ** 0.5
+        target = 0.02 * sum(r.regret for r in best_runs) / len(best_runs)
+        needed = (2.0 * deviation / target) ** 2
+
+        print(f"{name:<22} {mean:>12.1f} {ci:>9.1f} {loose:>12.1f} {needed:>12,.0f}")
+
 
 if __name__ == "__main__":
     cli()

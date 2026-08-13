@@ -459,3 +459,74 @@ Rules:
   keeps its own weights free and only queries a function. Do not let this
   result talk you out of the pairwise-basis route (kb/three_arm.md).
 
+
+## 12. Artifacts declare their shape; loaders never infer it (2026-08-13)
+
+A checkpoint is a state dict, and it is tempting to recover the architecture
+from it by measuring: hidden widths from weight shapes, kink count from
+whether `kink_in.weight` exists, feature count from the first layer's input
+width. It works, so it survives — and every one of those is a load-bearing
+fact reconstructed from a coincidence of geometry.
+
+What it cost here, in one session:
+
+- A checkpoint could not be loaded without a second file on disk being the
+  right shape. `three_arm_v2` sized its frozen basis by reading the champion
+  symlink, so an unrelated experiment repointing that link made every v2
+  checkpoint unloadable — even though the basis weights were IN the file.
+- Two grafts silently corrupted what they wrote. Stitching a smooth
+  checkpoint into a kinked net copied the source's `kink_count = 0` over the
+  target's 8, saving a declaration the file's own weights disprove; the same
+  bug, independently, copied a source's hidden widths into a wider target.
+- The `kink_` PREFIX matched more than the kink branch. Two sibling modules
+  filtered branch tensors with `name.startswith("kink_")`, which also caught
+  the `kink_count` metadata and deleted it. Both were written by someone who
+  knew exactly what the prefix meant on the day they wrote it.
+
+The fix is to say it instead of measuring it. A base class registers
+`(features, hidden, kinks)` as BUFFERS, so `state_dict()` carries them at no
+cost to the save path and the loader reads a declaration. Two rules make it
+hold:
+
+- The buffers describe the MODULE, not the file. A loaded state dict cannot
+  contradict them: the declaration decides what to BUILD, and after that the
+  module is the authority. Without this, every graft — which legitimately
+  changes shape — writes a lie.
+- Migrate the artifacts, then DELETE the inference. Keeping the old path "for
+  compatibility" means the fragile code is still what runs on anything old,
+  which is exactly the case nobody tests. Rewriting every checkpoint took one
+  idempotent script and one pass; the backfill belongs in that script, which
+  may guess because it is told which problem each file is, never in the
+  library, which must not.
+
+Generalizes past checkpoints: whenever a consumer reconstructs a producer's
+intent from the shape of what arrived, the reconstruction is a second source
+of truth that drifts. Prefix-matching a serialized namespace is the same
+mistake wearing a string.
+
+## 13. Size a sweep from the PAIRED spread (2026-08-13)
+
+The arena gives every policy the same drawn effects and the same noise, so a
+per-rep DIFFERENCE cancels the environment — which is nearly all of the
+variance. Measured on a 800-rep two-arm sweep: the leader's margin over
+Thompson has a 95% CI of 0.3 paired against 0.8 unpaired, and the reps needed
+to resolve a 2% effect at 2 sigma fall from tens of thousands to ~1,900.
+
+Two failures follow from ignoring it:
+
+- Sizing from the unpaired spread. A 50k-rep sweep was launched to compare two
+  checkpoints whose difference a few thousand paired reps would have settled.
+  The rep count was not the waste; the ESTIMATOR was, and the rep count was
+  merely how the waste got paid for.
+- Running the comparison as two SEPARATE processes. Both entrants belong in
+  one run, where the pairing is exact by construction. Splitting them halves
+  the statistics, doubles the wall-clock, and makes the pairing something to
+  verify afterwards rather than something guaranteed. It also forbids changing
+  `--size` between the two, because batch width reorders float32 reductions and
+  a policy carrying a net is sensitive to that over a long horizon.
+
+Also: `--workers` is not a throughput dial. On a 128-core box already running
+trainers, 48 threads gave 68 runs/s at load average 177 — oversubscribed and
+thrashing. Time a `--size 500` probe at two or three thread counts on the box
+you will actually use, then launch. It costs ~15 seconds against sweeps
+measured in hours.

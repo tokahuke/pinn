@@ -149,6 +149,26 @@ Use these as consistency checks on any numerical solution:
   102 for the four it keeps) and pde was unchanged. It is a monomial in
   features already present, so there is nothing to hand over. Recorded so the
   experiment is not repeated.
+
+  OPEN, and measured differently on 2026-08-13: locating the boundary by
+  BISECTION on the response's zero set (the largest lead still worth an
+  experiment, per tauhat) and fitting `muhat_b ~ tauhat**(-q)` over four
+  decades gives q = 0.899 on the 16:16 champion, against the 0.75-0.80 above.
+  The two are not the same measurement -- the table scores how TIGHT a given
+  exponent's level set is around the boundary, the fit asks what exponent the
+  boundary actually follows -- but they should agree and do not. The likely
+  reason is that it is not a pure power law: the LOCAL exponent between
+  consecutive bisected points runs 0.72 at the low-precision end to 1.23 at
+  the high, so a single q is a summary of something curved, and the two
+  methods weight the decades differently.
+
+      tauhat        1e-2    1e-1    1e0     1e1     1e2
+      muhat_b      21.13    3.783   0.485   0.0648  0.0049
+      local q         --    0.775   0.947   0.854   1.231
+
+  Worth resolving because the curvature law and the tauhat-tail anchoring both
+  reference the boundary's shape. Do not quote a single q without saying which
+  decade it came from.
 - How the net represents the tau dependence (2026-08-11, 402-param 16:16 net,
   all 16 first-layer units live): 11 of 16 units carry OPPOSING weights on
   `muhat sqrt(tauhat)` and `muhat tauhat`, making each preactivation

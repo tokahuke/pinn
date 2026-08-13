@@ -609,6 +609,65 @@ the term.
 premature commitment AND a weight-0 control run of equal length isolates the
 term's effect from ordinary training. Absent both, this is settled.
 
+## 16. The pairwise basis: how much of u is three two-arm premia? (measured 2026-08-12/13)
+
+The N-arm scaling route is to build the premium out of the TWO-arm premium of
+each pair -- one basis net whatever N is, with only the call count growing
+(3 pairs at N = 3, 6 at N = 4), against a monolith whose feature stack grows
+quadratically. This section is what the ansatz is worth, measured rather than
+argued.
+
+Each pair is a two_arm problem in that pair's own marginal (Schur) precision:
+on the fundamental wedge m_c <= m_b <= 0 arm a leads every pair, so with
+`det = tau_bb tau_cc - tau_bc^2`,
+
+    p_ab = u2(-m_b,      tau_bb - tau_bc^2 / tau_cc)
+    p_ac = u2(-m_c,      tau_cc - tau_bc^2 / tau_bb)
+    p_bc = u2(m_b - m_c, det / (tau_bb + tau_cc + 2 tau_bc))
+
+Regressing the three_arm champion's premium on those three, 20k wedge points,
+basis `data/two_arm.pt` (a 402-parameter net):
+
+    quantity        R2 (all)   R2 (alive)   coefficients (ab, ac, bc)
+    premium value     0.9790     0.9766     +0.923, +0.476, +0.102
+    d/d tau_bb        0.7651     0.7606     +0.724, +0.703, +0.697
+    d/d tau_cc        0.8664     0.8719     +0.944, +0.359, +0.600
+
+Four things follow, and the last two are the load-bearing ones.
+
+- The basis contributes SHAPE, not precision. A 406-parameter basis and a
+  9,154-parameter one give identical R2, identical coefficients and identical
+  Jaccard (0.93) between the leading pair's dead set and three_arm's commit
+  region. The basis can be as small as two_arm's own winner.
+- The 98% is not an artifact of the dead region. Restricting to points where
+  the premium is strictly positive (48.6% of draws) barely moves it.
+- VALUE is not the graded quantity. The HJB residual is built from
+  derivatives -- the learning operator is (mean diffusion) + v_tbb -- and the
+  fit there is 0.76-0.87, not 0.98. About a quarter of what gets scored is not
+  linear in the pair premia, so a correction net needs real capacity; it is
+  not a perturbation.
+- The coefficients DIFFER by quantity. On the value the leading pair dominates
+  (0.92 / 0.48 / 0.10); on d/d tau_bb all three enter about equally
+  (0.72 / 0.70 / 0.70). A combiner fitted on values is wrong by ~7x on the
+  third pair for the slopes, so a learned head must NOT be seeded from the
+  value fit.
+
+The combiner is therefore a learned linear term plus a correction net, summed
+in RESPONSE space, not premium space. The coefficients sum to 1.501: added as
+premia they overcount by half and the result is not a value function, because
+each pair premium assumes the whole budget goes to that pair. Behind the
+envelope-times-saturated-response gate, `0 <= u < nu2` stays architectural
+whatever the coefficients do.
+
+Cost, measured on a crowded 4090 at batch 4096: a v2 step is 1.30x a v1 step,
+and step cost is FLAT in width for both (619 ms at 2,754 parameters against
+670 ms at 9,739; 894 ms at 914 against 872 ms at 9,794). The step is
+dispatch-bound on the analytic machinery -- five derivatives, the 2x2 Hessian,
+24-node Genz quadrature, the seven-candidate max -- so the basis toll is fixed
+rather than scaling, and a SMALLER v2 is relatively more expensive because
+there is less net to amortise it over. v2's payoff at N = 3 cannot be training
+time; it has to be accuracy-per-parameter and the N-arm scaling.
+
 ## To come
 
 - Nothing mathematical: the problem is fully derived. Remaining work is code

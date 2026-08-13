@@ -18,16 +18,22 @@ with the near-flat default prior, evaluated directly (no policy table),
 commits landing on exact simplex vertices. Those two filenames are historical
 and no longer resolve; see the staleness note.
 
-**Stale as of 2026-08-10 — the numbers are right, the nets are not.** Every
-row below was re-derived from the two raw studies on 2026-08-10 and
-reproduces exactly, so the tables stand as a faithful record of what those
-checkpoints did at size 4,000. Both nets have since been replaced: the
-two_arm one was deleted (it was byte-identical to what is now
-`data/two_arm.2026-08-09.pt`), and the three_arm path was repointed
-2026-08-07, retrained through the concavity term on 2026-08-10, and retrained
-again under the natural-units grading fix (learnings section 3, which also
-moved every loss figure onto a new scale). Re-run both sweeps once those
-retrains land; until then read the ratios as two-to-three generations old.
+**SUPERSEDED 2026-08-13.** Every row below is a faithful record of what the
+2026-08-06 checkpoints did at size 4,000, and nothing else: both nets have
+since been replaced several times over, the residual grading changed under
+them (natural units, learnings section 3), and the arena's
+`_FLATTEST_TAUHAT` guard moved 1e-2 -> 1e-3. Current numbers, 2026-08-13, at
+production parameters with the paired estimator:
+
+    two_arm    6,000 reps   PINN 0.77 vs Thompson, on 0.45 of the evidence
+    three_arm  4,000 reps   PINN 0.83 vs Thompson, on 0.35 of the evidence
+
+Two things those replace. The old tables have the three-arm margin BEATING
+the two-arm one (0.77 against 0.80), which supported a claim that the margin
+grows with the number of arms; it now runs the other way (0.83 against 0.77)
+and that claim is withdrawn. And in the harsh-drift world the old record had
+the drift net losing badly to Thompson -- at the loosened guard it wins,
+23,661 against 27,771, +4,110 +/- 778 paired.
 
 ## Two arms
 

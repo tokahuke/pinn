@@ -20,12 +20,21 @@ from .harness import Params, Policy, Run, Runner, optimal_deadline
 # every other script's data path.
 CHECKPOINT = Path("data") / "two_arm.pt"
 
-# Internal (dimensionless) detail: the weakest prior the champion currently
-# supports. Below this decade its L_ab goes negative at the ridge (the
-# stiff-corner error, measured 2026-08-06), flipping the Hamiltonian convex
-# and vertex-committing on zero evidence; revisit when the low-tau anchor
-# lands. One decade above the sampler floor 1e-3.
-_FLATTEST_TAUHAT = 1e-2
+# The weakest prior the champion is trusted at, in dimensionless precision.
+# 1e-3, the sampler's own PRIOR_FLOOR, so the guard no longer clamps inside
+# the training support at all.
+#
+# It was 1e-2 until 2026-08-13, guarding a low-tauhat corner where L_ab went
+# negative at the ridge and the policy committed on no evidence. That corner
+# is gone: the champion of that date satisfies pairwise positivity on 100.0%
+# of states and full concavity on 99.9%. Re-measured on the CURRENT drift
+# champion, 3000 paired reps at production parameters, loosening 1e-2 -> 1e-3
+# CUT harsh-drift regret by 62% (-38,753 +/- 3,591) and bought 3.6x the
+# evidence, and changed nothing in the deployment world (+361 +/- 601, a CI
+# covering zero). The 2026-08-10 measurement that made 1e-2 load-bearing said
+# the opposite on both counts; it was taken against a checkpoint since
+# replaced by one 39x better, and the crutch had become the injury.
+_FLATTEST_TAUHAT = 1e-3
 
 
 @cache

@@ -286,27 +286,37 @@ kb/arena_results.md were run on checkpoints two or three generations back
 entirely. Re-run both once the retrains land.
 
 Open frontiers:
-- The low-tauhat floor decade: below `tauhat ~ 1e-2` `L_ab` goes NEGATIVE at
-  the ridge, flipping the Hamiltonian convex and vertex-committing on zero
-  evidence — a policy pathology, not just a residual. SOLVED for
-  two_arm_drift by the `pos_learning` term (floor decade 54.2% -> ~10%
-  violating, commit-on-no-evidence gone) and for two_arm (retrofit through
-  an escalating weight, 2026-08-09: shelf gone at every muhat, floor decade
-  16.0% -> 6.8%); still open for both three-arm modules, where nothing
-  asserts it and the arena's `_FLATTEST_TAUHAT` guards it meanwhile.
-  That guard is LOAD-BEARING, measured 2026-08-10: lowering it 1e-2 -> 1e-3
-  (the sampler's own `PRIOR_FLOOR`, so still inside the training support)
-  raised harsh-drift regret by ~50% and CUT the evidence bought to a quarter.
-  Mechanism — at a vertex the mean is frozen (no design, no update) and the
-  clamped tau input freezes too, so the policy's inputs stop moving and
-  commitment becomes absorbing; the guard accidentally prevents that by
-  parking the net just off the exact vertex. Do not "fix" the guard without
-  fixing the low-tau policy first.
-- Concavity for N >= 3, derived 2026-08-08, implemented 2026-08-09 as the
-  sampled-direction loss, TRAINED THROUGH overnight 2026-08-10 (both
-  three-arm champions carry it; the concavity term is now small on
-  `three_arm.pt`, so the original "start ~100x above pde" calibration cannot
-  be reproduced against it — `CONCAVITY_WEIGHT` is provisional). The
+- The low-tauhat floor decade: CLOSED 2026-08-13, and the guard that stood in
+  for it is GONE. Below `tauhat ~ 1e-2` `L_ab` used to go negative at the
+  ridge, flipping the Hamiltonian convex and vertex-committing on zero
+  evidence. Fixed for the two-arm pair by `pos_learning` (two_arm_drift floor
+  decade 54.2% -> ~10%; two_arm 16.0% -> 6.8% through an escalating weight)
+  and for three_arm by the concavity term, which now reads 100.0% pairwise /
+  99.9% concave. `_FLATTEST_TAUHAT` is 1e-3 in all three zoos, the sampler's
+  own `PRIOR_FLOOR`, so it no longer clamps inside the training support.
+  The 2026-08-10 record said that guard was LOAD-BEARING — that lowering it
+  raised harsh-drift regret ~50% and cut evidence to a quarter. Re-measured
+  2026-08-13 against the CURRENT drift champion, 3000 paired reps at
+  production parameters, both halves invert: harsh drift -38,753 +/- 3,591
+  regret (a 62% CUT) on 3.6x the evidence, deployment drift +361 +/- 601
+  (indistinguishable from zero). The old number was taken against a
+  checkpoint since replaced by one 39x better on the residual, and by then
+  the crutch was the injury. LESSON: a guard justified against a broken net
+  must be re-measured every time the net is replaced, or it silently becomes
+  the thing being measured.
+- Concavity for N >= 3: CLOSED 2026-08-13, kept here for the derivation and
+  the shape of the loss. On the champion of that date, 20k wedge states,
+  100.0% satisfy pairwise positivity and 99.9% satisfy FULL concavity — from
+  92.6% and 78.1% on the 2026-08-09 net, when the all-directions test found
+  3x more violations than the pairwise one. What is left is 0.10% of states
+  where `det M < 0`, and they sit at HIGH precision (median `tau_bb` 1.00
+  against 0.36 for the sample), the opposite end of the domain from the
+  low-tau floor decade this frontier was originally about. Derived
+  2026-08-08, implemented 2026-08-09 as the sampled-direction loss, trained
+  through from 2026-08-10 (both three-arm champions carry it; the concavity
+  term is now small on `three_arm.pt`, so the original "start ~100x above
+  pde" calibration cannot be reproduced against it — `CONCAVITY_WEIGHT` is
+  provisional). The
   Hamiltonian is a quadratic on the simplex and must be concave. Writing the
   tangent direction as `f`, `d' M d = -2 Phi(f f')`, so concavity is
   `L[f] >= 0` for EVERY contrast direction, not only the N(N-1)/2 pair ones.
@@ -323,20 +333,20 @@ Open frontiers:
   (unfloored it nans wherever the eigenvalues coincide, which includes the
   entire contact set), and the naive clamp makes relu's full-strength
   gradient push the dead region alive — three pieces of epsilon-carpentry
-  the sampled form does not need. Measured on the three_arm champion
-  (8k-batch, 2026-08-09): 92.6% of points satisfy pairwise positivity but
-  only 78.1% are concave, so the all-directions test finds 3x more.
-- Boundary placement under drift, the frontier the arena opened 2026-08-10
-  and the one no current loss term can see. In a harsh-drift world (winner
-  flipping ~every horizon) the drift net loses badly to plain Thompson: it
-  owns the best MEDIAN of any entrant and is destroyed in the TAIL, because a
-  commitment buys no information and only erosion can undo it — replayed tail
-  runs sit ~78% of the horizon on the arm that is losing at that moment, and
-  switch on the erosion clock (~an order of magnitude slower than evidence
-  would). The value function is not innocent there (its natural-units error
-  is ~7x worse in that corner than at deployment), but the residual, the
-  positivity term and the concavity term are all blind to WHERE the free
-  boundary sits. This is the case for the decision-side program: the
+  the sampled form does not need.
+- Boundary placement under drift, opened 2026-08-10 and MOSTLY RECLASSIFIED
+  2026-08-13. The record was that in a harsh-drift world (winner flipping
+  ~every horizon) the drift net lost badly to plain Thompson — best median,
+  destroyed in the tail, ~78% of the horizon on the arm that is losing at
+  that moment, switching on the erosion clock rather than on evidence. Most
+  of that was the `_FLATTEST_TAUHAT` guard, not the net: at 1e-3 with the
+  current champion the PINN BEATS Thompson in harsh drift, 23,661 against
+  27,771, +4,110 +/- 778 paired, on half the evidence. The guard clamped the
+  net's `tau` input from below and so held it just off the vertex; against a
+  net that no longer needs the crutch it was forcing commitments the net
+  would not have made. What remains open is narrower: the residual, the
+  positivity term and the concavity term are still blind to WHERE the free
+  boundary sits, and nothing yet grades it. This is the case for the
   claim-vs-simulation check for 2ad first (a batched rollout evaluator
   vectorizes over states and is ~90% of what policy iteration needs), then
   policy iteration. Build it on the vectorized arena, not on the deleted

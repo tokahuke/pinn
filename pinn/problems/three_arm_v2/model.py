@@ -1,39 +1,23 @@
 """
 The pairwise ansatz: three_arm's premium with a two_arm net as basis.
 
-Same envelope and same saturated response as three_arm -- the proven bound
-`0 <= u < nu2` stays architectural -- but the response also sees the two_arm
-premium of each PAIR of the wedge, computed by a frozen basis net. The basis
-is a submodule, so a checkpoint is self-contained and reproducible.
+CLAUDE.md's ansatz, in PREMIUM space:
 
-Why a basis at all (measured 2026-08-12): three two_arm premia explain 98.0%
-of three_arm's premium by linear regression, their leading pair's dead set
-matches three_arm's commit region at Jaccard 0.93, and inside the feature
-stack they carry the largest d/dtau of anything there -- which is what the
-learning numbers are built from. The basis is ONE net whatever N is; only the
-call count grows, which is the whole point (CLAUDE.md, three_arm_v2).
+    u = f(u2_ab, u2_ac, u2_bc) + correction
 
-The combiner is EXPLICIT: a linear term in the three pair premia plus a
-correction net that sees everything (all fifteen three_arm features and the
-three premia). Both are summed in RESPONSE space, not premium space, which is
-what keeps `0 <= u < nu2` architectural -- the same three coefficients added
-in premium space overcount by half (they fit to 1.501, measured 2026-08-13)
-and the result is not a value function.
+f is a linear head on the three pair premia, computed by a frozen two_arm
+basis; the correction is three_arm's architecture entire (envelope times
+saturated response, kink branch included) reading all eighteen features. The
+basis is a submodule, so a checkpoint is self-contained.
 
-The split is earned rather than assumed. Regressing the three_arm champion on
-the pair premia, 20k wedge points, basis data/two_arm.pt (2026-08-13):
+The basis is ONE net whatever N is -- only the call count grows -- which is
+the scaling argument for the whole approach. Why these features, and what a
+regression of the champion on them measures, is kb/three_arm.md section 16.
 
-    premium value   R2 0.977    coefficients +0.923, +0.476, +0.102
-    d/d tau_bb      R2 0.761    coefficients +0.724, +0.703, +0.697
-    d/d tau_cc      R2 0.872    coefficients +0.944, +0.359, +0.600
-
-So the linear part is nearly the whole story for the VALUE and only ~three
-quarters of it for the DERIVATIVES, which is what the HJB residual is built
-from -- hence a correction net with real capacity, not a perturbation. Note
-the coefficients differ between value and slope (the leading pair dominates
-the value; all three enter the slope about equally), so the linear head is
-LEARNED, not seeded from the value fit: those coefficients are the wrong ones
-for the quantity that gets graded.
+`0 <= u < nu2` is NOT architectural here, unlike every other problem in the
+tree: a sum of premia can exceed nu2, and p_bc is bounded by it on no state
+at all. Deliberate, 2026-08-13 -- find out whether the ansatz is worth
+anything before paying to constrain it.
 """
 
 from __future__ import annotations
@@ -64,6 +48,14 @@ BASIS = Path("data") / "two_arm.pt"
 # slices; keep them last if the stack ever grows.
 PAIR_COUNT = 3
 FEATURE_COUNT = 15 + PAIR_COUNT
+
+# The linear fit of the champion's premium on the three pair premia, 20k wedge
+# points (R2 0.977, kb/three_arm.md section 16). NOT the init: seeding there
+# measured 28% worse than starting at zero on an otherwise identical net,
+# which is what the derivative R2 of 0.76 predicts -- the residual grades
+# slopes, and the fit is a value fit. Kept as the number to compare the
+# trained head against.
+VALUE_FIT = (0.923, 0.476, 0.102)
 
 # The basis is only trained on muhat > 0 and down to its sampler's floor;
 # below these it extrapolates. Binds on ~1% of wedge draws, all of it in the
@@ -138,12 +130,11 @@ class ExplorationPremium(DeclaresTopology):
             nn.init.zeros_(self.kink_out.bias)
             nn.init.constant_(self.kink_in.bias, 0.5)
 
-        # The combiner: four parameters against the correction net's thousands.
-        # Zero-init so a fresh net starts as the correction alone and the
-        # linear term has to earn every unit of what it takes over.
-        self.pair_head = nn.Linear(PAIR_COUNT, 1)
+        # The combiner, in PREMIUM space: u = f(p_ab, p_ac, p_bc) + correction.
+        # Zero-init, so the basis earns whatever it takes and the trained
+        # weights can be read against VALUE_FIT.
+        self.pair_head = nn.Linear(PAIR_COUNT, 1, bias=False)
         nn.init.zeros_(self.pair_head.weight)
-        nn.init.zeros_(self.pair_head.bias)
 
         self.log_scale = nn.Parameter(torch.zeros(()))
         self.register_buffer("feature_scale", torch.ones(FEATURE_COUNT))
@@ -209,12 +200,7 @@ class ExplorationPremium(DeclaresTopology):
             m_b, m_c, tau_bb, tau_bc, tau_cc
         )
         scaled = features / self.feature_scale
-        # Linear combiner on the calibrated premia, plus the correction net on
-        # everything. Calibrated, not raw: the premia span decades, and the
-        # feature_scale buffer already divides that out for the net.
-        response = self.net(scaled).squeeze(-1) + self.pair_head(
-            scaled[..., -PAIR_COUNT:]
-        ).squeeze(-1)
+        response = self.net(scaled).squeeze(-1)
 
         if self.kinks > 0:
             bumps = torch.relu(self.kink_in(scaled)) ** 2
@@ -224,8 +210,10 @@ class ExplorationPremium(DeclaresTopology):
             m_b, m_c, precision_b.rsqrt(), precision_c.rsqrt(), correlation
         )
         response_squared = torch.relu(response) ** 2
+        correction = envelope * response_squared / (1.0 + response_squared)
 
-        return envelope * response_squared / (1.0 + response_squared)
+        # RAW premia, not the feature-scaled copies: the fit is in premium units.
+        return self.pair_head(features[..., -PAIR_COUNT:]).squeeze(-1) + correction
 
 
 class DimensionlessValueFunction(ThreeArmValue):
@@ -286,13 +274,8 @@ if __name__ == "__main__":
     assert premium.net[0].in_features == FEATURE_COUNT
     assert u.shape == draw.m_b.shape and u.isfinite().all()
 
-    # The proven bound is architectural, exactly as in three_arm.
-    _, precision_b, precision_c, correlation = premium._features(*state)
-    bound = nu2(
-        draw.m_b, draw.m_c, precision_b.rsqrt(), precision_c.rsqrt(), correlation
-    )
-
-    assert (u >= 0).all() and (u <= bound + 1e-6).all()
+    # Non-negative, but NOT bounded by nu2 -- see the module docstring.
+    assert (u >= 0).all()
 
     # The basis is frozen and IN the checkpoint: a v2 net that needed a
     # separate file to be loadable would not be reproducible.
@@ -312,15 +295,22 @@ if __name__ == "__main__":
 
     # The linear combiner is four trainable parameters, it starts silent, and
     # it moves the response once it is not zero -- a head that could not change
-    # the output would be four parameters of decoration.
-    assert premium.pair_head.weight.numel() + premium.pair_head.bias.numel() == 4
+    # the output would be three parameters of decoration.
+    assert premium.pair_head.weight.numel() == PAIR_COUNT
+    assert premium.pair_head.bias is None
     assert all(p.requires_grad for p in premium.pair_head.parameters())
     assert torch.allclose(premium.pair_head.weight, torch.zeros(1, PAIR_COUNT))
 
-    with torch.no_grad():
-        premium.pair_head.weight.fill_(0.5)
+    # It acts in PREMIUM space: a unit weight must move u by exactly the premium
+    # it multiplies, not by something the gate has squashed.
+    features, *_ = premium._features(*state)
 
-    assert (premium(*state) - u).abs().max() > 0
+    with torch.no_grad():
+        premium.pair_head.weight.copy_(torch.tensor([[1.0, 0.0, 0.0]]))
+
+    moved = premium(*state) - u
+
+    assert torch.allclose(moved, features[..., -PAIR_COUNT], atol=1e-6)
 
     with torch.no_grad():
         premium.pair_head.weight.zero_()

@@ -77,11 +77,6 @@ A quick map of the repo, for the curious:
   written, `jobq down` fetches everything and destroys the pod. Entirely
   optional — nothing in the repo needs it.
 
-Trained checkpoints are not published: they moved faster than any release
-could track, and the ones that were up became unloadable when checkpoints
-started declaring their own architecture. Train your own — the Quickstart
-below does it from scratch — or ask.
-
 Checkpoints live in the gitignored `data/`, named `<problem>.<topology>.pt`,
 with the bare `<problem>.pt` a symlink at whichever currently wins. So
 `ls -l data/` reads as a leaderboard, and promoting a challenger is one

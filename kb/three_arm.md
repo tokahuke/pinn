@@ -668,6 +668,38 @@ rather than scaling, and a SMALLER v2 is relatively more expensive because
 there is less net to amortise it over. v2's payoff at N = 3 cannot be training
 time; it has to be accuracy-per-parameter and the N-arm scaling.
 
+### Verdict: tried, and rejected (2026-08-13)
+
+Built as `three_arm_v2` and deleted the same week; the code and the full
+reasoning are at the git tag `three-arm-v2-final`. It never led at matched
+parameters AND matched iterations -- v1 32:32:32 reached 9.6e-2 by iteration
+20k, the v2 of the same size needed 50k to reach 1.07e-1.
+
+The bound is where it broke, and the two ways to place the combination are
+both blocked:
+
+- In RESPONSE space (inside the `relu(r)**2 / (1 + relu(r)**2)` gate),
+  `0 <= u < nu2` stays architectural, but no linear-in-r term survives a
+  squaring and a rescaling. Trained 315k iterations there, the head found
+  0.081 / 0.004 / 0.013 against the fit's 0.923 / 0.476 / 0.102, contributed
+  6% of the response, and the correction net weighted the pair columns at
+  0.38x the other features. Permuting the premia damaged the residual LESS
+  than permuting any other feature group but the raw anchors.
+- In PREMIUM space, where the fit lives, nothing bounds the sum. The head
+  trained to the OPPOSITE sign -- -0.812 / -0.362 / +0.002 -- using the
+  premia as a subtraction the correction then overshoots to cancel, because
+  two large opposing terms fit a residual more easily than one term that has
+  to be right. The result leaves the space of value functions: u < 0 on 4.37%
+  of states (worst -2.02) and u > nu2 on 5.49% (worst ratio 1.4e28). Its
+  residual is not comparable to a net whose premium is provable.
+
+A next attempt needs the combination in premium space AND a bound. p_ab and
+p_ac are each bounded by nu2 (max ratio 0.88 over 50k wedge states), so a
+simplex over those two plus an enveloped correction is legal. p_bc is bounded
+by nu2 on no state: it exceeds it on 19.8%, without limit, because the
+losers' contest stays alive where both challengers are hopeless against the
+control and nu2 -> 0. p_bc can be a FEATURE, never a term of the value.
+
 ## To come
 
 - Nothing mathematical: the problem is fully derived. Remaining work is code

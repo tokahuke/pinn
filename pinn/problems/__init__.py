@@ -10,6 +10,4 @@ PROBLEMS = [
     "two_arm_drift",
     "three_arm",
     "three_arm_drift",
-    # A promise, not a name: it supersedes three_arm or it goes (CLAUDE.md).
-    "three_arm_v2",
 ]

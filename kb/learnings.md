@@ -471,9 +471,10 @@ fact reconstructed from a coincidence of geometry.
 What it cost here, in one session:
 
 - A checkpoint could not be loaded without a second file on disk being the
-  right shape. `three_arm_v2` sized its frozen basis by reading the champion
-  symlink, so an unrelated experiment repointing that link made every v2
-  checkpoint unloadable — even though the basis weights were IN the file.
+  right shape. A net that embedded a frozen basis sized it by reading the
+  champion symlink, so an unrelated experiment repointing that link made
+  every such checkpoint unloadable — even though the basis weights were IN
+  the file.
 - Two grafts silently corrupted what they wrote. Stitching a smooth
   checkpoint into a kinked net copied the source's `kink_count = 0` over the
   target's 8, saving a declaration the file's own weights disprove; the same

@@ -27,15 +27,16 @@ TIE_WEIGHT = 2.4e2
 POWER = 1.0
 
 # Concavity, three_arm's term verbatim -- the erosion is control-free, so the
-# drift Hessian is the static one. Both constants are post-saturation and
-# calibrated on the MEDIAN pde over seven draws. The scale is larger than
-# three_arm's only because this net is far from converged and its violations
-# are correspondingly deep; lower it as it catches up.
-CONCAVITY_SCALE = 1.0e-1
+# drift Hessian is the static one, and the SCALE is three_arm's too. It sat at
+# 1e-1 until 2026-08-13 "because this net is far from converged", which made
+# violation mean something different in the two problems and left the terms
+# incomparable across the pair.
+CONCAVITY_SCALE = 1.0e-3
 # Calibrated on the MEDIAN pde over seven draws, not one: the pde varies
 # several-fold between batches and a single-draw calibration put this at 730%
-# of it. Target ~5%.
-CONCAVITY_WEIGHT = 3.4e0
+# of it. Target ~5%; re-derived 2026-08-13 against the corrected sampler and
+# CONCAVITY_SCALE, where 3.4 had drifted to 14% of the equation.
+CONCAVITY_WEIGHT = 1.2e0
 
 
 def pde_loss(value: DimensionlessValueFunction, draw: Sample) -> tuple[Tensor, Tensor]:

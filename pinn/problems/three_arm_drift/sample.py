@@ -14,11 +14,12 @@ from torch.quasirandom import SobolEngine
 
 from ...utils import chi_squared_1, decade_scale, exponential, laplace
 
-# three_arm's constants, minus PRECISION_MEAN: under drift the overall size of
-# T is set by the ceiling, not by an absolute scale, so that constant would
-# cancel. SCALE_DECADES now spreads the FRACTION of the ceiling reached, the
-# same role it plays in two_arm_drift.
+# three_arm's constants, unchanged: the state law IS three_arm's, and drift
+# only clips it from above (see _precision_from_uniforms). Keeping the numbers
+# identical is what makes the low-etahat slice the static problem rather than
+# something adjacent to it.
 PRIOR_FLOOR = 1e-3
+PRECISION_MEAN = 2.0
 SCALE_DECADES = 3.0
 MEAN_SCALE = 2.0
 
@@ -72,7 +73,7 @@ class Sample:
         t = _SOBOL.draw(n).clamp(1e-7, 1.0 - 1.0e-7)
         etahat = _etahat(t[:, 7], t[:, 8])
         tau_bb, tau_bc, tau_cc = _precision_from_uniforms(
-            t[:, 0], t[:, 1], t[:, 2], t[:, 5], t[:, 6], etahat
+            t[:, 0], t[:, 1], t[:, 2], t[:, 5], etahat
         )
 
         # Means last, conditionally on the precisions: each mean is drawn with
@@ -148,7 +149,7 @@ class RidgeSample:
         t = _SOBOL_WALL.draw(n).clamp(1e-7, 1.0 - 1.0e-7)
         etahat = _etahat(t[:, 6], t[:, 7])
         tau_bb, tau_bc, tau_cc = _precision_from_uniforms(
-            t[:, 0], t[:, 1], t[:, 2], t[:, 4], t[:, 5], etahat
+            t[:, 0], t[:, 1], t[:, 2], t[:, 4], etahat
         )
 
         det = tau_bb * tau_cc - tau_bc**2
@@ -165,7 +166,7 @@ class RidgeSample:
         t = _SOBOL_WALL.draw(n).clamp(1e-7, 1.0 - 1.0e-7)
         etahat = _etahat(t[:, 6], t[:, 7])
         tau_bb, tau_bc, tau_cc = _precision_from_uniforms(
-            t[:, 0], t[:, 1], t[:, 2], t[:, 4], t[:, 5], etahat
+            t[:, 0], t[:, 1], t[:, 2], t[:, 4], etahat
         )
 
         det = tau_bb * tau_cc - tau_bc**2
@@ -189,12 +190,11 @@ def _precision_from_uniforms(
     u_ac: Tensor,
     u_bc: Tensor,
     u_scale: Tensor,
-    u_tail: Tensor,
     etahat: Tensor,
 ) -> tuple[Tensor, Tensor, Tensor]:
     """
-    Uniforms -> pairwise precisions -> precision entries, but scaled to a
-    FRACTION of the drift ceiling rather than to an absolute size.
+    Uniforms -> pairwise precisions -> precision entries: three_arm's law,
+    clipped at the drift ceiling.
 
     Drift caps how much can ever be known: what you buy stops keeping up with
     what the wandering destroys, and the cap has a shape, not just a size (doc
@@ -203,9 +203,17 @@ def _precision_from_uniforms(
 
         det T  <=  det T*  =  1 / (2 sqrt3 etahat^2)
 
-    The three chi-squared draws set only the SHAPE of T; the scale then places
-    det exactly, between the numerical floor and that ceiling, clipped at the
-    top so the clipped mass lands ON the ceiling where trajectories converge.
+    The three chi-squared draws set only the SHAPE of T; three_arm's own scale
+    law sizes it, and the ceiling only CLIPS -- so where drift does not bind
+    this sampler IS three_arm's, and the clipped mass lands on the ceiling
+    where trajectories converge.
+
+    Drawing a FRACTION of the ceiling instead (until 2026-08-13) made every
+    state ceiling-relative, so the low-drift slice inflated with the ceiling
+    rather than matching the static problem: at etahat < 0.01 its median det
+    was 1,250x three_arm's and its p05 42,000x, which pushed the means 6x
+    small (they are drawn conditionally on det). The net trained on
+    high-information states and was graded on the stiff low-information ones.
 
     Placing det rather than flooring the pair coordinates afterwards is what
     makes both bounds EXACT. three_arm floors the taus additively, which under
@@ -223,16 +231,16 @@ def _precision_from_uniforms(
     # det of the unscaled shape, in pair coordinates.
     shape_det = shape_ab * shape_ac + shape_bc * (shape_ab + shape_ac)
 
-    # Where this state sits between floor and ceiling, in det units.
-    fraction = (decade_scale(u_scale, SCALE_DECADES) * exponential(u_tail)).clamp(
-        max=1.0
-    )
+    # three_arm's own scale law, ABSOLUTE, and its det.
+    scale = PRECISION_MEAN * decade_scale(u_scale, SCALE_DECADES)
+    static_det = scale**2 * shape_det
+
     # etahat floored where the drift ceiling meets the static cap DET_MAX, so
     # the etahat -> 0 anchor stays inside the decades training can see.
     ceiling_det = 1.0 / (
         2.0 * SQRT3 * etahat.clamp_min((2.0 * SQRT3 * DET_MAX) ** -0.5) ** 2
     )
-    target_det = (fraction * ceiling_det).clamp_min(PRIOR_FLOOR**2)
+    target_det = static_det.clamp(max=ceiling_det).clamp_min(PRIOR_FLOOR**2)
 
     # det scales as the square, so the linear multiplier is the square root.
     multiplier = (target_det / shape_det).sqrt()
@@ -275,8 +283,29 @@ if __name__ == "__main__":
     # dominates, which costs about four digits (three_arm's own det check is
     # in float64 for the same reason). Measured worst excess 1.6e-4.
     assert (ratio <= 1.0 + 1e-3).all(), ratio.max().item()
-    assert (ratio > 0.9).float().mean() > 0.05, "no mass on the ceiling"
-    assert ((ratio > 0.05) & (ratio < 0.9)).float().mean() > 0.2, "nothing mid-band"
+
+    # The ceiling CLIPS, it does not SIZE. Where drift is negligible nothing
+    # should sit on it; where drift is real most states should. Drawing a
+    # fraction OF the ceiling (until 2026-08-13) inverted this and inflated
+    # the whole low-drift slice.
+    quiet, loud = draw.etahat < 0.01, draw.etahat > 10.0
+
+    assert (ratio[quiet] > 0.9).float().mean() < 0.01, "clip binds at etahat ~ 0"
+    assert (ratio[loud] > 0.9).float().mean() > 0.4, "ceiling unreached under drift"
+
+    # And the quiet slice IS three_arm: same constants, ceiling inactive, so
+    # its det distribution must match. This is the regression test for the bug
+    # above, which put the median 1,250x out.
+    from ..three_arm.sample import Sample as StaticSample
+
+    static = StaticSample.draw(40000)
+    static_det = static.tau_bb * static.tau_cc - static.tau_bc**2
+
+    for level in (0.25, 0.5, 0.75):
+        mine = det[quiet].quantile(level).item()
+        theirs = static_det.quantile(level).item()
+
+        assert 0.4 < mine / theirs < 2.5, (level, mine, theirs)
 
     # The law's own high decades carry real mass, and etahat still reaches
     # the three_arm anchor at 0.

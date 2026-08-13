@@ -28,16 +28,59 @@ class GainedTanh(nn.Module):
         return (self.gain * x).tanh()
 
 
-def hidden_widths(state: dict) -> list[int]:
+class DeclaresTopology(nn.Module):
     """
-    A checkpoint's hidden widths, from the premium net's weight shapes. The
-    head's output width is not a hidden layer, hence the trailing drop.
+    Base for premium nets: records its own shape as buffers, so the shape
+    travels inside the state dict and a loader READS the architecture instead
+    of reverse-engineering it from weight geometry. Subclass it and pass the
+    shape up -- `super().__init__(hidden, kinks)`.
+
+    Buffers, not a separate config file or a wrapped save format: `state_dict()`
+    already carries them, so nothing about how checkpoints are written changes.
+
+    The buffers always describe THIS module. A checkpoint's declaration is read
+    (read_topology) to decide what to BUILD; once built, the module is the
+    authority and a loaded state dict cannot contradict it. GRAFTS depend on
+    that: stitching a smooth checkpoint into a kinked net would otherwise let
+    the source's kink_count = 0 overwrite the target's 8, and the net would
+    save a declaration its own weights disprove.
     """
-    return [
-        w.shape[0]
-        for k, w in state.items()
-        if k.startswith("premium.net.") and k.endswith(".weight")
-    ][:-1]
+
+    def __init__(self, features: int, hidden: list[int], kinks: int = 0) -> None:
+        super().__init__()
+
+        self.register_buffer("features", torch.tensor(features, dtype=torch.long))
+        self.register_buffer("topology", torch.tensor(hidden, dtype=torch.long))
+        self.register_buffer("kink_count", torch.tensor(kinks, dtype=torch.long))
+
+    def _load_from_state_dict(self, state_dict: dict, prefix: str, *rest) -> None:
+        for name in ("features", "topology", "kink_count"):
+            state_dict[prefix + name] = getattr(self, name)
+
+        super()._load_from_state_dict(state_dict, prefix, *rest)
+
+
+def read_topology(state: dict, prefix: str = "premium.") -> tuple[list[int], int]:
+    """
+    The (hidden widths, kink count) a checkpoint declares.
+
+    Every checkpoint declares: they are written by DeclaresTopology and the
+    ones predating it were rewritten 2026-08-13. A KeyError here means a file
+    from before that, which is a file to migrate, not a case to handle.
+    """
+    return state[prefix + "topology"].tolist(), int(state[prefix + "kink_count"])
+
+
+def read_features(state: dict, prefix: str = "premium.") -> int:
+    """
+    How wide a checkpoint's feature stack is, as it declares.
+
+    The drift problems graft from their static sibling, which is exactly one
+    feature narrower, and used to detect that by measuring the first layer's
+    input width. Same reverse-engineering as the old hidden_widths, one
+    dimension over.
+    """
+    return int(state[prefix + "features"])
 
 
 def parse_topology(topology: str) -> tuple[list[int], int]:

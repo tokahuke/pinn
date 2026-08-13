@@ -12,7 +12,8 @@ from pathlib import Path
 from torch import Tensor
 from typing import Self
 
-from ...net import GainedTanh, hidden_widths, parse_topology
+from ...net import DeclaresTopology, GainedTanh, parse_topology
+from ...net import read_features, read_topology
 from ...utils import nu
 from .sample import sample_sobol
 from .simplex import Maximum, maximize_quadratic
@@ -21,7 +22,7 @@ from .simplex import Maximum, maximize_quadratic
 FEATURE_COUNT = 4
 
 
-class ExplorationPremium(nn.Module):
+class ExplorationPremium(DeclaresTopology):
     """
     Dense GainedTanh MLP times the free-information envelope:
 
@@ -70,7 +71,7 @@ class ExplorationPremium(nn.Module):
     """
 
     def __init__(self, hidden: list[int]) -> None:
-        super().__init__()
+        super().__init__(FEATURE_COUNT, hidden)
 
         sizes = [FEATURE_COUNT, *hidden, 1]
         layers: list[nn.Module] = []
@@ -106,10 +107,6 @@ class ExplorationPremium(nn.Module):
         self.feature_scale = self._features(muhat, tauhat).std(dim=0).clamp_min(1e-3)
 
     def _load_from_state_dict(self, state_dict: dict, prefix: str, *rest) -> None:
-        # Pre-calibration checkpoints trained with no feature scaling, which
-        # is exactly a scale of ones.
-        state_dict.setdefault(prefix + "feature_scale", torch.ones(FEATURE_COUNT))
-
         super()._load_from_state_dict(state_dict, prefix, *rest)
 
     def _features(self, muhat: Tensor, tauhat: Tensor) -> Tensor:
@@ -146,11 +143,12 @@ class DimensionlessValueFunction(nn.Module):
     @classmethod
     def load(cls, path: Path) -> Self:
         """
-        A trained checkpoint as a model, architecture inferred from the state
-        dict (hidden widths from the premium net's weight shapes).
+        A trained checkpoint as a model, at the architecture the checkpoint
+        DECLARES; older ones that declare nothing fall back to inferring the
+        widths from the premium net's weight shapes.
         """
         state = torch.load(path)
-        hidden = hidden_widths(state)
+        hidden, _ = read_topology(state)
         value = cls(ExplorationPremium(hidden))
         value.load_state_dict(state)
 
@@ -258,7 +256,8 @@ def init_model(
 
         return DimensionlessValueFunction(ExplorationPremium(hidden))
 
-    value = DimensionlessValueFunction(ExplorationPremium(hidden_widths(state)))
+    hidden, _ = read_topology(state)
+    value = DimensionlessValueFunction(ExplorationPremium(hidden))
     value.load_state_dict(state)
 
     return value

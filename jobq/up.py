@@ -5,37 +5,38 @@
 from __future__ import annotations
 
 import click
-import subprocess
 
 from importlib.resources import files
 
-from .pod import KEY, find, runpodctl, ssh_flags, ssh_info, sync_repo
+from .daemon import Daemon
+from .pod import KEY, Pod, runpodctl
 
 # Ships a working CUDA torch on python 3.12; setup.sh inherits both through
 # a --system-site-packages venv rather than reinstalling 2.5GB of torch.
 IMAGE = "runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404"
 
 # Tried in order: stock moves hour to hour and a create against a sold-out
-# type just errors. Measured 2026-08-11: the step is dispatch-bound, so the
-# cheapest card is as good as the dearest -- order by price, not by FLOPs.
+# type just errors, so the first with capacity wins.
+#
+# Ordered by MEASURED work per dollar, not by price. The step is
+# dispatch-bound, which made "the cheapest card is as good as the dearest"
+# look obvious -- and it is wrong. Same benchmark (three_arm, graphed, batch
+# 16384, idle card), 2026-08-12:
+#
+#     RTX 4090    14.5 ms/step   $0.34 community / $0.74 secure
+#     RTX A6000   46.7 ms/step   $0.33 community / $0.53 secure
+#
+# 3.2x faster for the same community price -- about 5x the work per dollar
+# against the A6000 on secure. Clock explains only part of it (3105 MHz
+# against 2100); Ada's scheduler does the rest on small kernels. L4 and A40
+# are UNMEASURED fallbacks, listed only so a create still lands when the
+# first two are dry.
 GPUS = (
-    "NVIDIA RTX A6000",
     "NVIDIA GeForce RTX 4090",
-    "NVIDIA L4",
+    "NVIDIA RTX A6000",
     "NVIDIA A40",
+    "NVIDIA L4",
 )
-
-
-def remote_write(address: str, port: int, path: str, body: str) -> None:
-    """A rendered artifact onto the pod, never touching the local disk."""
-    done = subprocess.run(
-        ["ssh", *ssh_flags(port), f"root@{address}", f"cat > {path}"],
-        input=body,
-        text=True,
-    )
-
-    if done.returncode != 0:
-        raise click.ClickException(f"writing {path} failed ({done.returncode})")
 
 
 @click.command()
@@ -52,7 +53,7 @@ def remote_write(address: str, port: int, path: str, body: str) -> None:
     type=click.Choice(["SECURE", "COMMUNITY"]),
     default="SECURE",
     show_default=True,
-    help="COMMUNITY is cheaper but only maps ssh on hosts with a public ip.",
+    help="COMMUNITY is ~40% cheaper for the same card; it is other people's machines, so treat interruption as possible.",
 )
 @click.option(
     "--idle",
@@ -80,7 +81,7 @@ def up(
             f"`runpodctl ssh add-key --key-file {KEY}.pub`"
         )
 
-    pod = find(name)
+    pod = Pod.find(name, resolve=False)
 
     if pod is None:
         for candidate in [gpu] if gpu else GPUS:
@@ -98,6 +99,10 @@ def up(
                     candidate,
                     "--cloud-type",
                     cloud,
+                    # Community hosts only publish an ssh port when they have
+                    # a public ip, and without this the create waits for a
+                    # mapping that never appears. Harmless on secure.
+                    *(["--public-ip"] if cloud == "COMMUNITY" else []),
                     "--container-disk-in-gb",
                     str(disk),
                     # Declared at CREATE: adding 22/tcp later restarts the
@@ -113,12 +118,21 @@ def up(
                 break
         else:
             raise click.ClickException("no gpu type had stock; try --cloud COMMUNITY")
+    else:
+        # `up` means "make a working pod exist", so a stopped one is adopted
+        # rather than refused. Nothing else starts a pod: run, cp and backup
+        # all assume RUNNING and say so.
+        state = runpodctl("pod", "get", pod.id, timeout=120)
+        status = state.get("desiredStatus") if isinstance(state, dict) else None
 
-    detail = ssh_info(pod["id"])
-    address, port = detail["ip"], detail["port"]
-    click.echo(f"{name} ({pod['id']}) at {address}:{port}")
+        if status not in (None, "RUNNING"):
+            click.echo(f"{name} is {status}, starting it")
+            runpodctl("pod", "start", pod.id, timeout=300)
 
-    sync_repo(address, port)
+    pod = Pod.require(name)
+    click.echo(f"{name} ({pod.id}) at {pod.address}:{pod.port}")
+
+    pod.send_repo()
 
     if idle > 0:
         seppuku = (
@@ -127,19 +141,20 @@ def up(
             .read_text()
             .replace("@@IDLE_MINUTES@@", str(idle))
         )
-        remote_write(address, port, "/usr/local/bin/jobq-seppuku", seppuku)
+        pod.write("/usr/local/bin/jobq-seppuku", seppuku)
 
     setup = files("jobq.artifacts").joinpath("setup.sh").read_text()
-    done = subprocess.run(
-        ["ssh", *ssh_flags(port), f"root@{address}", "bash -s"],
-        input=setup,
-        text=True,
+
+    if pod.ssh("bash -s", stdin=setup) != 0:
+        raise click.ClickException("setup failed")
+
+    pid = Daemon(name).start()
+    click.echo(
+        f"  backup daemon pid {pid}"
+        if pid is not None
+        else "  BACKUP DAEMON FAILED TO START -- nothing is backing this pod up"
     )
-
-    if done.returncode != 0:
-        raise click.ClickException(f"setup failed ({done.returncode})")
-
-    click.echo(f"\nready:  ssh {' '.join(ssh_flags(port))} root@{address}")
+    click.echo(f"\nready:  ssh {' '.join(pod.flags)} {pod.host}")
     click.echo("        jobq run pinn train --problem ... --device cuda")
 
     if idle > 0:

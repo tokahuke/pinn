@@ -54,7 +54,14 @@ A quick map of the repo, for the curious:
 - `pinn/problems/two_arm` and `pinn/problems/three_arm`: the trainable models,
   samplers, and PDE losses (dimensionless, wedge-quotiented by the problems'
   exact symmetries). The math lives in `kb/two_arm.md` and
-  `kb/three_arm.md`; the transferable method in `kb/learnings.md`.
+  `kb/three_arm.md`; the transferable methIt'sod in `kb/learnings.md`.
+- `pinn/problems/two_arm_drift` and `pinn/problems/three_arm_drift`: the same
+  two problems in a world where the effects themselves drift, so yesterday's
+  evidence decays and a committed decision can become wrong on its own. One
+  extra parameter, no extra state: the drift rate is a network input, so a
+  single checkpoint serves every drift regime, and it reduces to the static
+  problem exactly when the drift is zero. Maths in `kb/two_arm_drift.md` and
+  `kb/three_arm_drift.md`.
 - `pinn/arena`: the policy shoot-out. An N-arm regret harness, the baseline
   zoo (Thompson, explore-then-commit, z-test/elimination), and the PINN
   entrant. Run it with `poetry run arena simulate ...` and then
@@ -62,14 +69,26 @@ A quick map of the repo, for the curious:
 - `pinn/cli`: the `pinn` command, one module per subcommand — `init` to
   create an untrained checkpoint, `train` to train it, `plot` and `validate`
   for two-arm diagnostics.
-- `probes.py`, `benchmark3.py`: three-arm diagnostics, still standalone.
+- `jobq`: rent a GPU, train on it, get the results back. `jobq up` creates a
+  RunPod pod and pushes the repo, `jobq run` executes there with the output
+  streaming to your terminal, `jobq backup` mirrors results down as they are
+  written, `jobq down` fetches everything and destroys the pod. Entirely
+  optional — nothing in the repo needs it.
 
 Trained models are published on the
-[latest release](https://github.com/tokahuke/pinn/releases/latest). If you
-just want it to work, grab the two-arm and three-arm champions and drop them
-into `data/` as `two_arm.pt` and `three_arm.pt` — that is where every command
-and snippet here looks for them; the other assets are archival. Everything
-else in this repo exists to train, test, and beat those two files.
+[latest release](https://github.com/tokahuke/pinn/releases/latest). The
+release predates the current naming convention, so rename as you download —
+every command and snippet here looks for these two paths:
+
+| release asset | save as |
+|---|---|
+| `value_2a_32x512.pt` | `data/two_arm.pt` |
+| `value_3a_64x64x64.pt` | `data/three_arm.pt` |
+
+The other assets are archival: the drifting-world nets (`value_2ad_`,
+`value_3ad_`), a legacy two-arm architecture, and a 16-kink three-arm
+experiment that lost to the 8-kink one. Everything else in this repo exists
+to train, test, and beat those two files.
 
 ## Quickstart
 
@@ -77,10 +96,10 @@ else in this repo exists to train, test, and beat those two files.
 poetry install
 
 # Create a net, then train it.
-poetry run pinn init --problem three_arm --topology 64:64:64k16 \
+poetry run pinn init --problem three_arm --topology 64:64:64k8 \
     --out data/three_arm.pt
 # Trains in place: --out defaults to --in. Ctrl-C stops and saves.
-poetry run pinn train --problem three_arm --in data/three_arm.pt
+poetry run pinn train --problem three_arm --in data/three_arm.pt --lr 1e-3
 
 poetry run python probes.py --in data/three_arm.pt   # diagnostics
 poetry run arena simulate data/study.pkl --problem three_arm \

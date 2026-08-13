@@ -8,55 +8,26 @@ import click
 
 from pathlib import Path
 
-from .pod import REMOTE, find, runpodctl, shell, ssh_flags
+from .daemon import Daemon
+from .pod import Pod
 
 # NOT data/ itself: the champions live there under the same names a pod would
 # write, and a fetch that clobbers two_arm.pt is unrecoverable.
 LANDING = Path("data/pod")
 
 
-def fetch(address: str, port: int) -> str:
-    """
-    Every checkpoint under /workspace, at any depth, into data/pod.
-
-    Two traps, both found by a --dry-run before a real teardown. `--exclude
-    '*'` excludes DIRECTORIES too, so without `--include '*/'` rsync never
-    descends and a sweep writing to /workspace/sweep/ is silently left behind.
-    And rsync refuses two remote sources in one call -- it printed its usage
-    and returned non-zero, which this treats as a failed fetch. One recursive
-    source covers both, since REMOTE lives under /workspace.
-    """
-    LANDING.mkdir(parents=True, exist_ok=True)
-    before = set(LANDING.rglob("*.pt"))
+def fetch(pod: Pod) -> str:
+    """Whatever is on the pod, into data/pod. Content-blind, like backup."""
+    before = set(LANDING.rglob("*"))
     # Not fatal: a pod whose ssh has died still has to be destroyable, or it
     # bills forever.
-    code = shell(
-        [
-            "rsync",
-            "-az",
-            "--prune-empty-dirs",
-            "-e",
-            f"ssh {' '.join(ssh_flags(port))}",
-            "--exclude",
-            "venv/",
-            "--include",
-            "*/",
-            "--include",
-            "*.pt",
-            "--exclude",
-            "*",
-            f"root@{address}:/workspace/",
-            str(LANDING),
-        ],
-        "fetch",
-        fatal=False,
-    )
-    arrived = len(set(LANDING.rglob("*.pt")) - before)
+    moved, code = pod.fetch(local=str(LANDING))
+    arrived = len(set(LANDING.rglob("*")) - before)
 
     if code != 0:
-        return f"rsync FAILED ({code}) -- {arrived} new .pt in {LANDING}"
+        return f"fetch FAILED (rsync {code}) -- {arrived} new files in {LANDING}"
 
-    return f"{arrived} new .pt in {LANDING}"
+    return f"{moved} files synced, {arrived} new, into {LANDING}"
 
 
 @click.command()
@@ -70,25 +41,39 @@ def down(name: str, yes: bool, no_fetch: bool) -> None:
     Destroying is the only thing that stops the billing -- a stopped pod still
     costs.
     """
-    pod = find(name)
+    pod = Pod.find(name, resolve=False)
 
     if pod is None:
         click.echo(f"no pod named {name}")
+        stopped = Daemon(name).stop()
+
+        if stopped is not None:
+            click.echo(f"  stopped an orphaned backup daemon (pid {stopped})")
 
         return
 
-    click.echo(f"{name} ({pod['id']}) at ${pod.get('costPerHr', '?')}/hr")
+    click.echo(f"{name} ({pod.id}) at ${pod.cost}/hr")
 
     if not no_fetch:
-        detail = runpodctl("ssh", "info", pod["id"], timeout=120)
-
-        if "error" in detail:
-            click.echo(f"  cannot fetch: {detail['error']}")
-        else:
-            click.echo(f"  {fetch(detail['ip'], detail['port'])}")
+        try:
+            click.echo(f"  {fetch(Pod.require(name))}")
+        except click.ClickException as unreachable:
+            click.echo(f"  cannot fetch: {unreachable.format_message()}")
 
     if not yes:
         click.confirm(f"destroy {name}?", abort=True)
 
-    runpodctl("pod", "delete", pod["id"], timeout=120)
-    click.echo(f"destroyed {name}" if find(name) is None else f"{name} STILL PRESENT")
+    # Stopped BEFORE the pod goes, so it is not left retrying against a
+    # corpse -- it reconnects with backoff and would never give up on its own.
+    stopped = Daemon(name).stop()
+    click.echo(
+        f"  backup daemon stopped (pid {stopped})"
+        if stopped is not None
+        else "  no backup daemon was running"
+    )
+    pod.destroy()
+    click.echo(
+        f"destroyed {name}"
+        if Pod.find(name, resolve=False) is None
+        else f"{name} STILL PRESENT"
+    )

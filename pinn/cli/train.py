@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import click
+import math
 import torch
 
 from importlib import import_module
@@ -133,7 +134,7 @@ def train(
     # order gradients), and it has no business inside a graph capture.
     trained = torch.compile(value) if compile_it and graphing is False else value
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    best, smoothed = float("inf"), None
+    best, smoothed, collapsed = float("inf"), None, 0
     steps = (
         graphed_training(
             trained,
@@ -148,6 +149,26 @@ def train(
 
     try:
         for step, score in enumerate(steps):
+            # A score of exactly zero, or a non-finite one, is a broken
+            # MEASUREMENT, not a solved equation -- and the rule below reads
+            # "smaller is better", so without this it is recorded as the best
+            # result ever and overwrites a good checkpoint with the wreck.
+            # Seen 2026-08-12: a two_arm run printed pde 0.000e+00 from
+            # iteration 131,100 onward (ridge 2.4e-12, so NOT the never-explore
+            # solution), trained 340k further iterations on the dead gradient,
+            # and left a checkpoint measuring 2.9e-1 where it had been 4.2e-5.
+            # Cause still unknown; this makes it loud instead of silent.
+            if score == 0.0 or math.isfinite(score) is False:
+                collapsed += 1
+
+                if collapsed in (1, 10, 100, 1000):
+                    click.echo(
+                        f"iter {step}: score {score} is not a measurement "
+                        f"({collapsed} so far) -- not saving, the run is dead"
+                    )
+
+                continue
+
             smoothed = score if smoothed is None else 0.99 * smoothed + 0.01 * score
 
             if step % 100 == 99 and smoothed < best:
@@ -161,8 +182,11 @@ def train(
     except KeyboardInterrupt:
         click.echo("Interrupted by user")
 
+    if collapsed > 0:
+        click.echo(f"{collapsed} steps scored zero or non-finite and were ignored")
+
     click.echo(
         f"saved {out_path} (best 100-step mean {best:.3e})"
         if best < float("inf")
-        else f"nothing saved: fewer than 100 iterations"
+        else "nothing saved: fewer than 100 iterations"
     )

@@ -52,9 +52,7 @@ pairwise signs. Earlier drafts used `U` for the even part
   - `poetry run pinn plot --in` (two_arm fields), `poetry run pinn validate`
     (two_arm section-6 identities).
 - Diagnostics still at the repo root: `poetry run python probes.py --in
-  data/<ckpt>.pt` (three_arm wedge slices, tau lines, symmetric-point table);
-  `benchmark3.py --in` (three_arm posterior-space self-consistency: the net's
-  claim vs its policy simulated).
+  data/<ckpt>.pt` (three_arm wedge slices, tau lines, symmetric-point table).
 - The arena (policy shoot-out vs TS/ETC/elimination on discrete epochs,
   regret vs true effects): `poetry run arena simulate <out.pkl> --problem
   two_arm|two_arm_drift|three_arm --rho ... --size N --workers K --eta E`,
@@ -182,26 +180,56 @@ Organized one-module-per-problem; the separation should be kept:
   flattest the checkpoint supports), `main.py` the CLI (mounted as `arena`
   via pyproject `[project.scripts]`; reflection discovers the chosen
   problem's zoo).
-- `probes.py`, `benchmark3.py` — click CLIs at the repo root; everything
-  else is a `pinn` subcommand in `pinn/cli/`.
+- `probes.py` — a click CLI at the repo root; everything else is a `pinn`
+  subcommand in `pinn/cli/`. benchmark3.py lived here too and was deleted
+  2026-08-12: a posterior-space Monte Carlo shoot-out written in the same
+  commit that introduced the arena, never developed after it, and half
+  duplicating the arena's three_arm zoo. Its one unique reading -- the net's
+  value CLAIM against its own policy simulated, which is how the ~9% junction
+  inflation was found -- has no replacement, but it is ~50 lines against the
+  vectorized arena if it is wanted again.
 - Module self-checks run as `poetry run python -m pinn.problems.two_arm.loss`
   (relative imports; both problem packages check per-module).
 
 `data/` is gitignored and holds checkpoints (`*.pt`) and diagnostic plots. Plots
 belong there (visible in the IDE), not in temp dirs.
 
-CHECKPOINT NAMING (canonicalized 2026-08-10): one name per problem, matching
-`--problem` — `two_arm.pt`, `two_arm_drift.pt`, `three_arm.pt`,
-`three_arm_drift.pt` — and that name always IS the current champion. Anything
-else is an archive and takes a date: `<problem>.<YYYY-MM-DD>.pt`, plus one word
-when the date alone does not identify it (`three_arm.2026-08-07-kink16.pt`,
-`two_arm.2026-08-04-legacy-arch.pt`). Nothing else goes in a filename: no
-topology (`load()` infers widths and kink count from the state dict), no
-hyperparameter tags (they expire — `_pos10` outlived its weight in a day), no
-loss values (metric-dependent, and one already caused a false comparison), no
-colons (they force shell quoting on every command). `pinn/arena/*.py` hardcode
-the canonical names, so retraining in place hands the arena the new champion
-with no repoint.
+CHECKPOINT NAMING (re-cut 2026-08-12): every real checkpoint file is
+`<problem>.<topology>.pt` with the topology spelled in `x` —
+`two_arm.32x256.pt`, `two_arm.16x16.pt`, `three_arm.64x64x64k8.pt`. The
+champion is a SYMLINK at the bare `<problem>.pt` pointing at whichever of them
+currently wins, so `ls -l data/` reads as a leaderboard and promotion is one
+`ln -sf` with no bytes copied and no code edit — `pinn/arena/*.py`,
+`three_arm_v2`'s `BASIS`, the CLI defaults and the README all name the bare
+link. Topology is the archive key because it is the axis nets are compared on
+and it is fixed for the file's whole life; a date is the TIEBREAKER only, for
+two nets of the same shape (`two_arm.16x16.2026-08-04.pt`), and it earns its
+place mainly across the 2026-08-10 natural-units break, where the two are not
+comparable at all. Still banned: hyperparameter tags (they expire — `_pos10`
+outlived its weight in a day), loss values (metric-dependent, and one already
+caused a false comparison), colons (scp and rsync read `a:b` as host:path).
+
+CHECKPOINTS DECLARE THEIR ARCHITECTURE (2026-08-13). Every premium subclasses
+`net.DeclaresTopology` and passes `(FEATURE_COUNT, hidden, kinks)` up; those
+become buffers, so `state_dict()` carries the shape and a loader READS it
+(`read_topology`, `read_features`) instead of reverse-engineering it from
+weight geometry. `hidden_widths` and the per-problem `_kinks` scans are
+DELETED and all 19 checkpoints were rewritten that day — a `KeyError` on
+`premium.topology` means a file older than that, which is a file to migrate,
+not a case to handle. The buffers always describe the module holding them and
+a loaded state dict cannot contradict them; that invariant is what stops a
+graft (smooth checkpoint into a kinked net) from saving a declaration its own
+weights disprove, and it is why `three_arm_v2` can load without consulting
+`BASIS` at all. Do not reintroduce shape inference: prefix-matching a state
+dict for `kink_in.weight` or `net.0.weight` was the bug class twice in one
+session.
+
+Two consequences of the link. Training through it writes the TARGET and leaves
+the link intact, so `pinn train --in data/two_arm.pt` still ages the champion in
+place — the tag stays honest because training cannot change a topology, but the
+previous weights are gone, so branch by `cp`-ing to a new tag first when they
+matter. And rsync sends links as links: `jobq cp` passes `-L` for this, anything
+else moving `data/` needs it too.
 
 ## State of play (2026-08-10) and open frontiers
 
@@ -309,9 +337,10 @@ Open frontiers:
   is ~7x worse in that corner than at deployment), but the residual, the
   positivity term and the concavity term are all blind to WHERE the free
   boundary sits. This is the case for the decision-side program: the
-  benchmark3-style claim-vs-simulation check for 2ad first (a batched
-  rollout evaluator vectorizes over states and is ~90% of what policy
-  iteration needs), then policy iteration. Do it AFTER the natural-units
+  claim-vs-simulation check for 2ad first (a batched rollout evaluator
+  vectorizes over states and is ~90% of what policy iteration needs), then
+  policy iteration. Build it on the vectorized arena, not on the deleted
+  benchmark3. Do it AFTER the natural-units
   retrains: grading decisions before the equation is solved in that regime
   is fixing the second problem first.
 - The b/c-junction blob (three_arm) at ~±0.07 relative, best ever, still
@@ -324,10 +353,60 @@ Open frontiers:
   kb/two_arm.md remain open.
 
 Planned next (intent recorded 2026-08-06):
-- three_arm v2, the pairwise ansatz: `u = f(u2_ab, u2_ac, u2_bc) + correction`
-  with the two_arm champion as basis — the kink-unit result is its proof of
-  concept, and it is the N-arm scaling route (N^2 pairs). Open: the combiner
-  (sum overcounts; must keep `0 <= u < nu2`), frozen vs fine-tuned basis.
+- `three_arm_v2`, the pairwise ansatz: `u = f(u2_ab, u2_ac, u2_bc) +
+  correction`, a frozen two_arm net as basis, evaluated once per PAIR. It is
+  the N-arm scaling route: the basis is ONE net whatever N is, and only the
+  call count grows (3 pairs at N=3, 6 at N=4).
+
+  THE `_v2` SUFFIX IS A PROMISE, NOT A NAME. It either supersedes `three_arm`
+  and takes that name, or it is deleted. There is never a `three_arm` and a
+  `three_arm_v2` in the tree at rest -- one module per problem, and the
+  suffix exists only for the length of the bake-off.
+
+  Evidence for it, measured 2026-08-12: three two_arm premia explain 98.0% of
+  three_arm's premium by LINEAR regression (coefficients 0.921 leader-vs-
+  runner-up, 0.465 leader-vs-last, 0.093 the losers' own contest), and the
+  leading pair's dead set matches three_arm's commit region at Jaccard 0.93.
+  Both numbers are IDENTICAL for a 406-parameter basis and the 9,154-parameter
+  one, so the basis contributes shape, not precision, and can be as small as
+  two_arm's own winner. Inside three_arm's feature stack the pair premia carry
+  the LARGEST `d/dtau` of all fifteen features (91.9 against 27.1 for the
+  next), which is the quantity `l_ab = mean_diffusion + v_tbb` is built from.
+
+  The case against the monolith is the scaling: three_arm's best pde is ~2e-3
+  against two_arm's 2.8e-5, two orders worse for 24x the parameters, and in
+  the 2026-08-12 architecture sweep the 9,754-parameter net still led at 92k
+  iterations while every small net trailed 2-4x -- the opposite of two_arm,
+  where 406 parameters beat 9,154 outright.
+
+  The combiner, SETTLED 2026-08-13: a learned linear term in the three pair
+  premia plus a correction net over all eighteen features, summed in RESPONSE
+  space. Response space is what makes it legal -- those coefficients sum to
+  1.501, so adding them in PREMIUM space overcounts by half and the result is
+  not a value function, while behind the envelope-times-saturated-response gate
+  `0 <= u < nu2` stays architectural whatever they do.
+
+  The correction is not a perturbation, which the regression settles (20k wedge
+  points, 2026-08-13): the pair premia explain R2 0.977 of the champion's
+  premium VALUE but only 0.761 of `d/d tau_bb` and 0.872 of `d/d tau_cc` -- and
+  the HJB grades derivatives, not values. Worse for a seeded combiner, the
+  coefficients differ by quantity: +0.923/+0.476/+0.102 on the value against
+  +0.724/+0.703/+0.697 on the slope, where all three pairs enter about equally.
+  So the linear head is LEARNED and zero-init, never seeded from the value fit.
+  Still open: frozen vs fine-tuned basis, and the fact that the 2% the basis
+  does not explain is exactly the b/c-junction blob, i.e. the correction net
+  inherits the hard part rather than the easy one.
+
+  Cost, measured on a crowded 4090 at batch 4096: a v2 step is 1.30x a v1 step,
+  and step cost is FLAT in width for both (619 ms at 2,754 parameters against
+  670 at 9,739; 894 at 914 against 872 at 9,794). The step is dispatch-bound on
+  the analytic machinery, so the basis toll is fixed rather than scaling, a
+  SMALLER v2 is relatively more expensive, and v2's payoff at N=3 cannot be
+  training time -- it has to be accuracy-per-parameter and the N-arm scaling.
+
+  NOT indicted by learnings section 11: that result is about WEIGHT
+  inheritance (a warm start is a local minimum). This is feature reuse -- the
+  child keeps its own weights and only queries a function.
 - Policy iteration (v3-sized): the arena evaluates policies; fit v to the
   EVALUATED policy value and re-extract.
 - Arena analyze: exploit the seed-pairing (per-rep differences vs the best)

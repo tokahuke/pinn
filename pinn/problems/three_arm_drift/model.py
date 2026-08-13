@@ -14,7 +14,8 @@ from pathlib import Path
 from torch import Tensor
 from typing import Self
 
-from ...net import GainedTanh, hidden_widths, parse_topology
+from ...net import DeclaresTopology, GainedTanh, parse_topology
+from ...net import read_features, read_topology
 from ..three_arm.simplex import Maximum, maximize_quadratic
 from .envelope import envelope as premium_cap
 from .sample import Sample
@@ -25,16 +26,7 @@ FEATURE_COUNT = 16
 SQRT3 = math.sqrt(3.0)
 
 
-def _kinks(state: dict) -> int:
-    """
-    A checkpoint's kink count, 0 if it has no branch.
-    """
-    weight = state.get("premium.kink_in.weight")
-
-    return 0 if weight is None else weight.shape[0]
-
-
-class ExplorationPremium(nn.Module):
+class ExplorationPremium(DeclaresTopology):
     """
     The premium net over the fundamental wedge.
 
@@ -48,7 +40,7 @@ class ExplorationPremium(nn.Module):
     """
 
     def __init__(self, hidden: list[int], kinks: int = 0) -> None:
-        super().__init__()
+        super().__init__(FEATURE_COUNT, hidden, kinks)
 
         sizes = [FEATURE_COUNT, *hidden, 1]
         layers: list[nn.Module] = []
@@ -144,26 +136,34 @@ class ExplorationPremium(nn.Module):
         # Both layers that read the feature stack get the pad, not just the
         # trunk: the kink branch reads it too, and forgetting it is a shape
         # error the moment anyone grafts a kinked checkpoint.
-        for name in ("net.0.weight", "kink_in.weight"):
-            weight = state.get(name)
+        if read_features(state, prefix="") == FEATURE_COUNT - 1:
+            for name in ("net.0.weight", "kink_in.weight"):
+                weight = state.get(name)
 
-            if weight is not None and weight.shape[1] == FEATURE_COUNT - 1:
-                state[name] = torch.cat(
-                    [weight, torch.zeros_like(weight[:, :1])], dim=1
-                )
+                if weight is not None:
+                    state[name] = torch.cat(
+                        [weight, torch.zeros_like(weight[:, :1])], dim=1
+                    )
 
-        if state["feature_scale"].shape[0] == FEATURE_COUNT - 1:
             state["feature_scale"] = torch.cat(
                 [state["feature_scale"], self.feature_scale[-1:]]
             )
 
-        for name, tensor in self.state_dict().items():
-            if name.startswith("kink_"):
-                state.setdefault(name, tensor)
+        # The kink BRANCH by name, not by a "kink_" prefix -- that prefix also
+        # matches the kink_count buffer, and dropping it left the graft
+        # undeclared and unloadable. (DeclaresTopology restores both shape
+        # buffers to this net's own, so the source's stale declaration cannot
+        # survive the load.)
+        mine = self.state_dict()
+        branch = ("kink_in.weight", "kink_in.bias", "kink_out.weight", "kink_out.bias")
 
-        for name in list(state):
-            if name.startswith("kink_") and self.kinks == 0:
-                del state[name]
+        for name in branch:
+            if name in mine:
+                state.setdefault(name, mine[name])
+
+        if self.kinks == 0:
+            for name in branch:
+                state.pop(name, None)
         self.load_state_dict(state)
 
     def _features(
@@ -308,7 +308,8 @@ class DimensionlessValueFunction(nn.Module):
         dict.
         """
         state = torch.load(path)
-        value = cls(ExplorationPremium(hidden_widths(state), kinks=_kinks(state)))
+        hidden, kinks = read_topology(state)
+        value = cls(ExplorationPremium(hidden, kinks=kinks))
         value.load_state_dict(state)
 
         return value
@@ -548,10 +549,9 @@ def init_model(
 
         return value
 
-    value = DimensionlessValueFunction(
-        ExplorationPremium(hidden_widths(state), kinks=_kinks(state))
-    )
-    features = state["premium.net.0.weight"].shape[1]
+    hidden, kinks = read_topology(state)
+    value = DimensionlessValueFunction(ExplorationPremium(hidden, kinks=kinks))
+    features = read_features(state)
 
     # A three_arm checkpoint is one feature narrower: stitch it as the
     # etahat = 0 slice.

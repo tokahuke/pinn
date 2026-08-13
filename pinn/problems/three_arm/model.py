@@ -12,7 +12,8 @@ from pathlib import Path
 from torch import Tensor
 from typing import Self
 
-from ...net import GainedTanh, hidden_widths, parse_topology
+from ...net import DeclaresTopology, GainedTanh, parse_topology
+from ...net import read_features, read_topology
 from ...utils import nu2
 from .sample import Sample
 from .simplex import Maximum, maximize_quadratic
@@ -21,7 +22,7 @@ from .simplex import Maximum, maximize_quadratic
 FEATURE_COUNT = 15
 
 
-class ExplorationPremium(nn.Module):
+class ExplorationPremium(DeclaresTopology):
     """
     The premium net over the fundamental wedge.
 
@@ -35,7 +36,7 @@ class ExplorationPremium(nn.Module):
     """
 
     def __init__(self, hidden: list[int], kinks: int = 0) -> None:
-        super().__init__()
+        super().__init__(FEATURE_COUNT, hidden, kinks)
 
         sizes = [FEATURE_COUNT, *hidden, 1]
         layers: list[nn.Module] = []
@@ -109,10 +110,6 @@ class ExplorationPremium(nn.Module):
         )
 
     def _load_from_state_dict(self, state_dict: dict, prefix: str, *rest) -> None:
-        # Pre-calibration checkpoints trained with no feature scaling, which
-        # is exactly a scale of ones.
-        state_dict.setdefault(prefix + "feature_scale", torch.ones(FEATURE_COUNT))
-
         # Stitching: checkpoints from before the kink branch load with the
         # branch at its zero-output init, functionally identical.
         if self.kinks > 0:
@@ -249,10 +246,7 @@ class DimensionlessValueFunction(nn.Module):
         onto a checkpoint that has none.
         """
         state = torch.load(path)
-        hidden = hidden_widths(state)
-
-        if "premium.kink_in.weight" in state:
-            kinks = state["premium.kink_in.weight"].shape[0]
+        hidden, kinks = read_topology(state)
         value = cls(ExplorationPremium(hidden, kinks=kinks))
         value.load_state_dict(state)
 
@@ -439,12 +433,7 @@ def init_model(
 
         return value
 
-    hidden = hidden_widths(state)
-    kinks = (
-        state["premium.kink_in.weight"].shape[0]
-        if "premium.kink_in.weight" in state
-        else 0
-    )
+    hidden, kinks = read_topology(state)
     value = DimensionlessValueFunction(ExplorationPremium(hidden, kinks=kinks))
     value.load_state_dict(state)
 
@@ -490,6 +479,15 @@ if __name__ == "__main__":
 
     assert torch.allclose(stitched(*state), u)
     assert stitched.kink_out.weight.requires_grad
+
+    # The graft must keep declaring ITS OWN shape. The smooth source says
+    # kink_count = 0; letting that win would save a net whose declaration its
+    # own kink weights disprove, and the next load would fail on them.
+    assert int(stitched.kink_count) == 8, int(stitched.kink_count)
+    assert read_topology(DimensionlessValueFunction(stitched).state_dict()) == (
+        [32, 16],
+        8,
+    )
 
     # The deployment wrapper: at rho = sigma = 1 on wedge states it equals
     # the dimensionless form; it is b<->c relabel invariant on any state; and

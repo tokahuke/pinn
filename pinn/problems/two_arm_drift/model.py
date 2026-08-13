@@ -12,7 +12,8 @@ from pathlib import Path
 from torch import Tensor
 from typing import Self
 
-from ...net import GainedTanh, hidden_widths, parse_topology
+from ...net import DeclaresTopology, GainedTanh, parse_topology
+from ...net import read_features, read_topology
 from ..two_arm.simplex import Maximum, maximize_quadratic
 from .envelope import envelope
 from .sample import sample_sobol
@@ -22,16 +23,7 @@ from .sample import sample_sobol
 FEATURE_COUNT = 5
 
 
-def _kinks(state: dict) -> int:
-    """
-    A checkpoint's kink count, 0 if it has no branch.
-    """
-    weight = state.get("premium.kink_in.weight")
-
-    return 0 if weight is None else weight.shape[0]
-
-
-class ExplorationPremium(nn.Module):
+class ExplorationPremium(DeclaresTopology):
     """
     two_arm's premium net with one extra feature and a wider envelope:
 
@@ -60,7 +52,7 @@ class ExplorationPremium(nn.Module):
     """
 
     def __init__(self, hidden: list[int], kinks: int = 0) -> None:
-        super().__init__()
+        super().__init__(FEATURE_COUNT, hidden, kinks)
 
         sizes = [FEATURE_COUNT, *hidden, 1]
         layers: list[nn.Module] = []
@@ -125,7 +117,7 @@ class ExplorationPremium(nn.Module):
         """
         state = dict(source)
 
-        if state["net.0.weight"].shape[1] == FEATURE_COUNT - 1:
+        if read_features(state, prefix="") == FEATURE_COUNT - 1:
             state["feature_scale"] = torch.cat(
                 [state["feature_scale"], self.feature_scale[-1:]]
             )
@@ -135,11 +127,20 @@ class ExplorationPremium(nn.Module):
         for name, want in self.state_dict().items():
             have = state.get(name)
 
+            # The shape buffers describe THIS net, never the source: a graft
+            # changes the feature width and can change the kink count, so
+            # copying the source's declaration would make the net save a shape
+            # its own weights disprove.
+            if name in ("topology", "kink_count"):
+                grafted[name] = want
+                continue
+
             # A source without kinks keeps this net's zero-init branch, so the
-            # graft is bit-exact at step 0. Only kink keys are defaulted:
-            # anything else missing is a real mismatch and should fail loudly.
+            # graft is bit-exact at step 0. Only the kink BRANCH is defaulted --
+            # by name, since a "kink_" prefix also catches kink_count -- and
+            # anything else missing is a real mismatch that should fail loudly.
             if have is None:
-                if not name.startswith("kink_"):
+                if name.split(".")[0] not in ("kink_in", "kink_out"):
                     raise KeyError(f"source is missing {name}")
 
                 grafted[name] = want
@@ -209,7 +210,8 @@ class DimensionlessValueFunction(nn.Module):
         dict (hidden widths from the premium net's weight shapes).
         """
         state = torch.load(path)
-        value = cls(ExplorationPremium(hidden_widths(state), kinks=_kinks(state)))
+        hidden, kinks = read_topology(state)
+        value = cls(ExplorationPremium(hidden, kinks=kinks))
         value.load_state_dict(state)
 
         return value
@@ -346,10 +348,9 @@ def init_model(
 
         return value
 
-    value = DimensionlessValueFunction(
-        ExplorationPremium(hidden_widths(state), kinks=_kinks(state))
-    )
-    features = state["premium.net.0.weight"].shape[1]
+    hidden, kinks = read_topology(state)
+    value = DimensionlessValueFunction(ExplorationPremium(hidden, kinks=kinks))
+    features = read_features(state)
 
     # A two_arm checkpoint is one feature narrower: stitch it as the etahat = 0
     # slice.

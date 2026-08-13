@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import click
 
-from .pod import find, shell, ssh_flags, ssh_info
+from .pod import Pod, shell
 
 
 @click.command()
@@ -25,6 +25,10 @@ def cp(name: str, paths: tuple[str, ...]) -> None:
 
     One direction per call: either the destination is remote or the sources
     are, never both.
+
+    -L, not plain -a: the canonical checkpoint names are symlinks onto the
+    topology-tagged file, and rsync's default is to send the link itself,
+    which arrives dangling.
     """
     if len(paths) < 2:
         raise click.ClickException("need at least a source and a destination")
@@ -37,24 +41,18 @@ def cp(name: str, paths: tuple[str, ...]) -> None:
             "exactly one side must be remote; mark it with a leading `:`"
         )
 
-    pod = find(name)
-
-    if pod is None:
-        raise click.ClickException(f"no pod named {name}; `jobq up` first")
-
-    detail = ssh_info(pod["id"])
-    host = f"root@{detail['ip']}"
+    pod = Pod.require(name)
 
     def resolve(path: str) -> str:
-        return f"{host}:{path[1:]}" if path.startswith(":") else path
+        return f"{pod.host}:{path[1:]}" if path.startswith(":") else path
 
     shell(
         [
             "rsync",
-            "-az",
+            "-azL",
             "--progress",
             "-e",
-            f"ssh {' '.join(ssh_flags(detail['port']))}",
+            pod.ssh_command,
             *(resolve(source) for source in sources),
             resolve(destination),
         ],

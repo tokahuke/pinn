@@ -16,14 +16,12 @@ Yes, it even beats Thompson Sampling for a simple AB test. Oh! If you have been 
 
 | policy | regret (Thompson = 1.00) | wrong commits | commits | evidence (Thompson = 1.00) |
 |---|---|---|---|---|
-| PINN (this repo) | **0.77** | 7.0% | 99.0% | **0.45** |
+| PINN (this repo) | **0.80** | 6.9% | 99.0% | **0.45** |
 | Thompson sampling | 1.00 | 0.0% | never | 1.00 |
-| explore-then-commit | 2.09 | 13.6% | 100% | 0.32 |
-| z-test at 5% | 2.47 | 10.6% | 93.0% | 0.70 |
+| explore-then-commit | 1.64 | 13.3% | 100% | 0.32 |
+| z-test at 5% | 1.83 | 10.6% | 93.5% | 0.68 |
 
-Better than TS in terms of "gains left on the table" (regret) and with the added benefit that _it actually stops_. It also needs to explore less in total: TS, even though it can deliver the goods, is known to be quite the over-curious explorer and the neural network fixes that — it knows when measuring stops paying. That is the whole trick: 23% less regret on 45% of the evidence.
-
-The net doing this has **402 parameters**. Full tables, including the three-arm arena, live in [kb/arena_results.md](kb/arena_results.md).
+Quite a lot better than TS in terms of "gains left on the table" (regret) and with the added benefit that _it actually stops_. It also needs to explore less in total. TS, even though it can deliver the goods, is known to be quite the over-curious explorer and the neural network fixes that. And the network that does that is _tiny_, at only 402 parameters. 
 
 ## Beyond just AB
 
@@ -31,16 +29,18 @@ The net doing this has **402 parameters**. Full tables, including the three-arm 
 
 ![The learned three-arm allocation policy](docs/policy_atlas.png)
 
-This "Gaussian blur"-thingy vanishing with information shows the net being more confident the more information you pass to it. It beats Thompson here too, and buys even less evidence to do it — though the regret margin is a little narrower than in the two-arm case, so the extra arm costs the net something:
+This "Gaussian blur"-thingy vanishing with information shows the net being more confident the more information you pass to it. And its performance is similar to the AB test:
 
 ![A/B/C arena results](docs/arena_three_arm.png)
 
 | policy | regret (Thompson = 1.00) | wrong commits | commits | evidence (Thompson = 1.00) |
 |---|---|---|---|---|
-| PINN (this repo) | **0.83** | 12.3% | 99.4% | **0.35** |
+| PINN (this repo) | **0.82** | 11.6% | 99.4% | **0.36** |
 | Thompson sampling | 1.00 | 0.0% | never | 1.00 |
-| elimination at 5% (generalized z-test) | 1.55 | 12.3% | 90.7% | 0.69 |
-| explore-then-commit | 1.80 | 21.6% | 100% | 0.29 |
+| elimination at 5% (generalized z-test) | 1.51 | 11.8% | 90.4% | 0.71 |
+| explore-then-commit | 1.78 | 21.1% | 100% | 0.29 |
+
+Again the net out-performs TS and again it does so by buying way less information. This time, however, the network we have trained is not tiny. For three arms, things already start getting complicated. After trying many topologies, the one that stuck had three layers and around 10k parameter; a network the size of the AB one woefully underperformed.
 
 What about ABCD? Man, the equations are *gnarly* for ABC already and should just be impossible for ABCD, but if you want to build it, you are welcome to contribute with a PR. There is already some support and some tips about how to do it in
 [kb/learnings.md](kb/learnings.md). However, be warned that PINNs do not scale to even hundreds of input dimensions and the number of features you have to feed the network is quadratic.
@@ -56,7 +56,7 @@ A quick map of the repo, for the curious:
 - `pinn/problems/two_arm` and `pinn/problems/three_arm`: the trainable models,
   samplers, and PDE losses (dimensionless, wedge-quotiented by the problems'
   exact symmetries). The math lives in `kb/two_arm.md` and
-  `kb/three_arm.md`; the transferable methIt'sod in `kb/learnings.md`.
+  `kb/three_arm.md`; the transferable method in `kb/learnings.md`.
 - `pinn/problems/two_arm_drift` and `pinn/problems/three_arm_drift`: the same
   two problems in a world where the effects themselves drift, so yesterday's
   evidence decays and a committed decision can become wrong on its own. One

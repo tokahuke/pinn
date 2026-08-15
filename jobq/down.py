@@ -31,7 +31,7 @@ def fetch(pod: Pod) -> str:
 
 
 @click.command()
-@click.option("--name", default="pinn", show_default=True)
+@click.option("--pod", "name", default="pinn", show_default=True)
 @click.option("--yes", is_flag=True, help="Skip the confirmation.")
 @click.option("--no-fetch", is_flag=True, help="Destroy without pulling checkpoints.")
 def down(name: str, yes: bool, no_fetch: bool) -> None:

@@ -98,6 +98,12 @@ class ExplorationPremium(DeclaresTopology):
         # solution starts inside the tanh range.
         self.log_scale = nn.Parameter(torch.zeros(()))
 
+        # Gate sharpness k for the softplus response (see forward). Init 10:
+        # near the relu gate it replaces, so grafting a relu-gate checkpoint
+        # moves the function only by O(1/k^2) at the seam and e^(-2k|r|)
+        # elsewhere. Trainable: the net picks how hard its own boundary is.
+        self.log_gate = nn.Parameter(torch.tensor(math.log(10.0)))
+
         # Xavier assumes unit-variance inputs; the raw feature stack breaks
         # that by 10-100x under the general sampling law, railing the first
         # tanh layer (measured 2026-08-05: 49% of units saturated, fatal for
@@ -160,6 +166,10 @@ class ExplorationPremium(DeclaresTopology):
         for name in branch:
             if name in mine:
                 state.setdefault(name, mine[name])
+
+        # Sources predating the softplus gate (2026-08-14) have no sharpness;
+        # this net's init (k = 10, near-relu) is the graft-faithful default.
+        state.setdefault("log_gate", mine["log_gate"])
 
         if self.kinks == 0:
             for name in branch:
@@ -267,23 +277,29 @@ class ExplorationPremium(DeclaresTopology):
             m_b, m_c, tau_bb, tau_bc, tau_cc, etahat
         )
 
-        # y/(1+y) with y = relu(r)**2 maps the response into [0, 1): both
-        # proven properties hold by construction, 0 <= u < envelope. The
-        # squared relu is the free-boundary trick (see two_arm's
-        # ExplorationPremium): committing all traffic to the leader observes
-        # no contrast, so v = commit solves the PDE exactly in the deep wedge
-        # and the true premium is exactly 0 there, pasting with u = u_m = 0
-        # and a jump only in the second derivative. relu(r)**2 has exactly
-        # that regularity on the learned zero set of r; a plain clip
-        # (first-derivative kink) would break the smooth pasting. Rational
-        # saturation, NOT tanh(y): tanh is float32-exactly 1 beyond r ~ 2.5
-        # and its gradient underflows, a cliff with no way back (the first
-        # three_arm start died there, r ~ 14 everywhere, only log_scale left
-        # trainable). y/(1+y) saturates with a polynomial tail, so gradients
-        # survive any overshoot.
-        response_squared = torch.relu(response) ** 2
+        # y/(1+y) with y = (softplus(k r)/k)**2 maps the response into
+        # [0, 1): 0 < u < envelope is architectural, and u is STRICTLY
+        # positive -- under drift there is no contact set (2ad doc section 5,
+        # u > 0 everywhere is a theorem), and the relu gate this replaces
+        # (2026-08-14) could not represent that. Worse than a representation
+        # gap: the commit envelope solves the interior equation EXACTLY, so
+        # wherever relu pinned u to 0 the residual was exactly 0 and an
+        # oversized commit region cost nothing -- the boundary was determined
+        # only by a thin seam band, and at etahat ~ 7.5 it collapsed to the
+        # origin (arena 2026-08-14: commits at epoch ~93, precision time
+        # 67.5 +/- 1.1, evidence-independent). With the softplus tail
+        # u ~ envelope e^(2 k r) the transport equation grades the whole
+        # former dead region, and never-explore leaves the function class.
+        # The cost, spent knowingly: at etahat = 0 the true contact set is
+        # real and this gate can only approach it (e^(-2k|r|)), so the
+        # three_arm graft anchor is close-not-bitwise. Rational saturation,
+        # NOT tanh (float32-exactly 1 beyond r ~ 2.5, gradient underflow, a
+        # cliff with no way back); softplus for the same reason on the low
+        # side: its tail keeps a live gradient at any depth float32 holds.
+        gate = self.log_gate.exp()
+        y = (torch.nn.functional.softplus(gate * response) / gate) ** 2
 
-        return envelope * response_squared / (1.0 + response_squared)
+        return envelope * y / (1.0 + y)
 
 
 class DimensionlessValueFunction(nn.Module):
@@ -310,6 +326,9 @@ class DimensionlessValueFunction(nn.Module):
         state = torch.load(path)
         hidden, kinks = read_topology(state)
         value = cls(ExplorationPremium(hidden, kinks=kinks))
+        # Checkpoints predating the softplus gate carry no sharpness; the
+        # init (k = 10) reads them as near-relu, which is what they were.
+        state.setdefault("premium.log_gate", value.premium.log_gate.detach().clone())
         value.load_state_dict(state)
 
         return value
@@ -605,16 +624,26 @@ if __name__ == "__main__":
 
     # THE graft: a three_arm checkpoint is one feature narrower, and at
     # etahat = 0 the extra feature is exactly 0 and the cap collapses onto
-    # three_arm's, so the stitched net IS the source. Bitwise, not close --
-    # this is the check that says the whole feature/cap/stitch chain is right.
+    # three_arm's. Close, NOT bitwise, since the softplus gate (2026-08-14):
+    # the source's relu gate and this class's soft one differ by at most
+    # (log2/k)^2 ~ 5e-3 of the envelope at the seam, decaying e^(-2k|r|)
+    # away from it. The feature/cap/stitch chain is still pinned exactly by
+    # the feature_scale identity below.
     three_arm = ThreeArm([32, 16])
     grafted = ExplorationPremium([32, 16])
     grafted.stitch(three_arm.state_dict())
     zero = torch.zeros_like(draw.m_b)
 
-    assert torch.equal(
-        grafted(draw.m_b, draw.m_c, draw.tau_bb, draw.tau_bc, draw.tau_cc, zero),
-        three_arm(draw.m_b, draw.m_c, draw.tau_bb, draw.tau_bc, draw.tau_cc),
+    graft_cap = premium_cap(
+        draw.m_b, draw.m_c, draw.tau_bb, draw.tau_bc, draw.tau_cc, zero
+    )
+    graft_gap = (
+        grafted(draw.m_b, draw.m_c, draw.tau_bb, draw.tau_bc, draw.tau_cc, zero)
+        - three_arm(draw.m_b, draw.m_c, draw.tau_bb, draw.tau_bc, draw.tau_cc)
+    ).abs()
+
+    assert (graft_gap <= 6e-3 * graft_cap + 1e-7).all(), (
+        (graft_gap / graft_cap.clamp_min(1e-9)).max().item()
     )
     assert torch.equal(grafted.feature_scale[:-1], three_arm.feature_scale)
 

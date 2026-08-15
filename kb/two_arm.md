@@ -296,3 +296,148 @@ Consequences:
 This is the low-tauhat sibling of the section 7 large-tauhat similarity ODE: the two
 asymptotic anchors now bracket the crossover at `tauhat ~ 1`, which is the only region
 with no closed-form structure.
+
+## 9. Below the sampling floor: what cannot be constructed there (2026-08-14/15)
+
+The net has no training signal below `PRIOR_FLOOR = 1e-3`, and two consumers
+reach there anyway: three_arm_v3's drop-one bases (pair Schur marginals dip to
+~floor/2 on 0.33% of wedge states) and any deployment state at a flatter
+prior. A day was spent trying to BLEND the response toward a constructed
+"exact" sub-floor value. Every target failed, each on a different axis, and
+the failures share one mechanism. Do not redo them.
+
+**The mechanism.** Raw residual = chart residual x `tauhat^(-3/2)` (section 8).
+The chart equation is `g_s + L0[g] = e^s (sqrt(g) + sqrt(g+z))^2`, so a
+construction is gradeable only if its chart residual decays like `e^s`.
+
+- `nu` is the unique construction that does: `L0[nu] = 0` IDENTICALLY (it is an
+  information martingale), leaving chart residual `O(e^s)` -> raw `O(u)`. But
+  that same identity is why its learning numbers vanish: the Hamiltonian
+  degenerates to the commit vertex.
+- ANY tau-frozen shape has `g_s = 0` with `L0[g] != 0`: chart residual `O(1)`
+  -> raw `O(u/tauhat)`. Policy alive, value diverging.
+- The true solution has both. No pointwise construction does.
+
+**The four targets, measured** (champion pde is 8.35e-6 unblended; all figures
+are 7-draw medians at batch 4096):
+
+| target | pde | failure |
+|---|---|---|
+| bare `nu` | 0.96 | `L = 0`; arena regret 99,529 vs TS 13,225, commits at epoch 1 on 1.0 epochs of evidence, 45.6% wrong |
+| first-order patient `g0 + tauhat g1` | 0.42 | `g1 >= 0` exceeds the proven envelope (+36% at the floor); alpha = 0 pocket at 1.3-1.6e-3 |
+| frozen floor shape | 6.90 | a frozen shape cannot track a source that DOUBLES per octave; +9.7 ridge overclaim mid-band |
+| `e^s`-linear between the two | 1.16 | the champion's floor departure from `nu` is ~40x the linear-regime scale, so the manufactured `g_s` flipped the start state itself |
+
+Blend SHAPE is an orthogonal axis and none of them mattered: `1/(1+y)` in
+log-tau (power-law tail, 1% three decades up), a Gaussian blip
+`exp(-relu(x)^2)`, and the C-infinity compact octave
+`sigmoid((1-2x)/(x(1-x)))` all regraded the champion to ~1, because the band's
+cost is the target-truth VALUE gap, not the tail. The patient-limit derivation
+(one linear ODE, Chebyshev solution, ODE residual 6e-9) is kept at
+kb/two_arm_patient.md: the mathematics is sound and the correction does drop
+the residual `1/tauhat` where it is applied PURELY; it is the blending into
+the graded law that fails.
+
+Also measured: L-BFGS (60 strong-Wolfe evaluations, batch 131072) moved a
+blended net's plateau by 0.13%. These are representability floors, not
+optimization floors.
+
+**What shipped instead: the clamp.** `forward` evaluates the response at the
+z-preserving floor state (`tau_eff = max(tauhat, PRIOR_FLOOR)`, `muhat` scaled
+so `z` is held) while the envelope stays at the true state; the
+`sqrt(FLOOR/tauhat)` similarity amplitude cancels through `nu`'s homogeneity,
+so the premium continues self-similarly as the floor's own shape. It binds
+ONLY off the sampling law, so training and every trained checkpoint are
+untouched BITWISE (champion pde 8.35e-6, pos_learning exactly 0), the
+sub-floor policy inherits the floor's positive learning content (alpha* 0.5
+down to tauhat 1e-4), and inputs never leave the trained support. Its cost is
+a first-derivative kink at the floor, on a surface no loss samples.
+
+Anchoring the clamp ABOVE the floor was measured and rejected: it overwrites
+trained territory, at 13.2 (1.25x floor), 25.9 (1.5x) and 54.1 (2x) against
+8.35e-6, with no policy improvement at any setting.
+
+The clamp buys VALUE honesty, not gradeability -- nothing can buy that. For
+three_arm_v3, whose sampler reaches sub-floor marginals, grading is the
+SAMPLER FENCE's job: fenced 4.9e-4 against unfenced 10.8 at a fresh init, so
+0.33% of states carry 99.995% of the loss.
+
+## 10. The subsolution objective (THE two_arm objective since 2026-08-15)
+
+V* is the MAXIMAL subsolution of the HJB, so
+
+    maximize u   subject to   v <= max H
+
+has the true value function as its optimum and every feasible point is a
+CERTIFIED lower bound: the greedy policy provably earns at least v (learnings
+section 9). Built as the `two_arm_v2` clone, measured, and PROMOTED into
+`pinn/problems/two_arm/loss.py` on 2026-08-15; the clone is deleted and the
+two-sided residual it replaced survives only in this record. Its reason to
+exist was never two_arm itself: three_arm_v3's
+base overclaims on 27% of wedge states because it is a trained net rather than
+the true u2, and that deadlocked a v3 run (kb/three_arm.md section 17).
+
+    loss = PENALTY * (violation + RIDGE * ridge) - CLIMB * climb
+    violation = mean(relu(v - max H) / tauhat**1.5)      LINEAR
+    climb     = mean(u / tauhat**1.5)                    natural units
+    PENALTY 1e3, RIDGE 2e4, CLIMB 1e2
+
+Four design points, each measured rather than argued:
+
+- LINEAR violation, not squared. An L1 penalty is EXACT -- above a finite
+  threshold (the largest Lagrange multiplier) the penalized optimum IS the
+  constrained optimum -- while a quadratic only approaches feasibility as the
+  weight grows. It is also what the house does for every other sign condition.
+  PENALTY 1e2 and 1e3 give indistinguishable curves, which is the signature of
+  being above the threshold: past it the weight stops mattering.
+- The climb is in the VIOLATION'S UNITS. A uniform climb (mean of the gate
+  u / nu) lost the floor decade: the violation carries tauhat**-1.5, 3.2e4 at
+  the floor, so the penalty outbid a flat climb by four orders there. The net
+  then bought slack by INFLATING THE LEARNING NUMBER (natural-units L
+  21.1 -> 23.4), which raises max H and drives v - max H deeply negative at no
+  cost, since undershoot is free. Result: violation 5.7e-7 and a two-sided
+  residual of 1.8, 99.2% of it in the floor decade. Matching the units fixes
+  the incentive. NOTE the inflation is also partly transient: at 3k iterations
+  the matched-units run still read L 24.6, and by 350k it had receded to 21.8.
+- pos_learning is REMOVED, by proof rather than calibration. Where L_ab < 0
+  the Hamiltonian is convex in alpha, so max H = e^s z at a vertex, while
+  v = e^s (z + g) with g >= 0 architectural -- the violation is then exactly
+  u. A negative learning operator is infeasible wherever the premium is alive
+  and harmless where it is not. Measured: violation/u in [0.94, 1.00] over
+  12,030 such states, the exceptions all at u <= 1.5e-6 where the difference
+  falls into float32 cancellation.
+- DUAL ASCENT ON THE PENALTY WAS TRIED AND REMOVED. It ramped lambda between
+  1e-2 and 1e6 because the update saturated: exp(RATE * clamp(violation /
+  BUDGET - 1, -1, 1)) is bang-bang whenever the violation is far from the
+  budget, which is almost always. A fixed weight needs no controller.
+
+Result after ~350k iterations from the champion, and the point of the whole
+exercise:
+
+    net                     pde        overclaim   sup(residual+)   floor L
+    old champion            8.17e-6    23.7%       2.08e-2          21.09
+    subsolution (promoted)  1.47e-1     0.60%      4.27e-4          21.73
+
+39x fewer overclaiming states and a 49x smaller certificate constant, with the
+premium intact (climb 2474 against 2497) and BC1 still at -0.4978. The pde is
+four orders WORSE, and that is the headline finding:
+
+**The arena does not notice.** 48,000 paired reps at production parameters,
+frontier scenario: the subsolution net beats Thompson by 21.5% against the old
+champion's 20.8%, and paired head to head it is -94.8 +/- 89.5 -- an interval
+that clears zero by a hair, after being +142 +/- 425 at 1,500 reps and
+-188 +/- 190 at 12,000. The defensible claim is NOT WORSE, plausibly ~1%
+better; the sign flipped once and this was the third look at overlapping seed
+blocks, so a clean confirmation wants fresh seeds. Four orders of residual
+bought at most 1.8% of regret in either direction. Learnings section 9 said
+policy error is second order and the residual is not the referee; this is the
+measurement.
+
+FAILURE MODE TO EXPECT: the run died at ~350k on the relu(r)**2 absorbing
+state (CLAUDE.md traps), and the signature differs from the documented one --
+not a frozen total, but `climb` AND `violation` printing exactly 0 while
+`ridge` stays SATISFIED at ~1e-11. The premium survives in a sliver at
+muhat = 0, enough to hold BC1's slope, and is dead everywhere the cloud
+samples. Nothing was lost: a dead net cannot beat a live one on this objective
+(the -CLIMB * climb term makes a live total ~ -2.4e5 against ~ +2e-4 dead), so
+best-EMA checkpointing is structurally safe here.

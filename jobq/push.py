@@ -10,7 +10,9 @@ from .pod import Pod
 
 
 @click.command()
-@click.option("--name", default="pinn", show_default=True, help="Pod to push to.")
+@click.option(
+    "--pod", "name", default="pinn", show_default=True, help="Pod to push to."
+)
 def push(name: str) -> None:
     """
     Send the repo to the pod, and nothing else.

@@ -12,7 +12,7 @@ from .pod import REMOTE, VENV, Pod, runpodctl
 
 
 @click.command(context_settings={"ignore_unknown_options": True})
-@click.option("--name", default="pinn", show_default=True, help="Pod to run on.")
+@click.option("--pod", "name", default="pinn", show_default=True, help="Pod to run on.")
 @click.option(
     "--log",
     default=None,
@@ -61,8 +61,20 @@ def run(name: str, log: str | None, args: tuple[str, ...]) -> None:
     prefix = f"cd {REMOTE} && export PATH={VENV}/bin:$PATH PYTHONUNBUFFERED=1"
 
     if log is not None:
+        # The parentheses are load-bearing: unparenthesized, `&` binds the
+        # whole `cd && export && nohup ...` and-list, so bash backgrounds a
+        # wrapper subshell that (a) keeps the ssh pipe open as its stdout --
+        # sshd then waits for the JOB to exit, and a "detached" launch
+        # measured 2026-08-13 returned after 40 minutes, at the exact moment
+        # its trainer was killed -- and (b) is what $! names, so the printed
+        # pid was the wrapper, one off the real job. Parenthesized, `&`
+        # backgrounds the fully-redirected simple command alone: the launch
+        # returns in ssh round-trip time and $! is the job (setsid does not
+        # fork under a non-interactive shell; it is there so the job also
+        # escapes the session group, the seppuku daemon's construction).
         remote = (
-            f"{prefix} && nohup {shlex.join(args)} >> {shlex.quote(log)} 2>&1 & echo $!"
+            f"{prefix} && (setsid nohup {shlex.join(args)} < /dev/null"
+            f" >> {shlex.quote(log)} 2>&1 & echo $!)"
         )
         # No tty: -t and a backgrounded nohup fight over the terminal, and the
         # pid never comes back.

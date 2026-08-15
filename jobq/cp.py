@@ -10,7 +10,9 @@ from .pod import Pod, shell
 
 
 @click.command()
-@click.option("--name", default="pinn", show_default=True, help="Pod to copy with.")
+@click.option(
+    "--pod", "name", default="pinn", show_default=True, help="Pod to copy with."
+)
 @click.argument("paths", nargs=-1, required=True)
 def cp(name: str, paths: tuple[str, ...]) -> None:
     """

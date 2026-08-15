@@ -700,7 +700,222 @@ by nu2 on no state: it exceeds it on 19.8%, without limit, because the
 losers' contest stays alive where both challengers are hopeless against the
 control and nu2 -> 0. p_bc can be a FEATURE, never a term of the value.
 
-## To come
+## 17. The drop-one subsolution (derived 2026-08-14)
+
+Ignoring one arm — never sampling it, never committing to it — is an
+admissible policy, and what remains is EXACTLY the two-arm problem on the
+surviving pair. Restricting the policy class can only lower the value, so
+each drop is a global lower bound and so is their max. On the wedge
+(C = 0, v = u), in section 16's pair-premium notation:
+
+    u(m, T) >= B(m, T) := max( 0,  p_ab,  p_ac,  m_b + p_bc )
+
+    p_ab = u2(-m_b,      tau_bb - tau_bc^2 / tau_cc)
+    p_ac = u2(-m_c,      tau_cc - tau_bc^2 / tau_bb)
+    p_bc = u2(m_b - m_c, det / (tau_bb + tau_cc + 2 tau_bc))
+
+Why each term is the exact drop value:
+
+- Drop c: on the alpha_c = 0 edge the (m_b, p_b)-dynamics are two_arm's bit
+  for bit — dtau_cc = dtau_bc = 0, so d p_b = dtau_bb =
+  (alpha_a alpha_b / sigma^2) dt, and the mean diffusion collapses to
+  gb / p_b^2 (the section 4 two-arm collapse). The restricted problem IS
+  two_arm at (-m_b, p_b); a leads the pair on the wedge, so the pair's
+  commit value is the wedge's own 0 and the drop value is the bare premium
+  p_ab. Drop b is the b<->c swap.
+- Drop a: inside {b, c} only the contrast theta_b - theta_c matters (the
+  common level is earned in expectation whichever arm is chosen); the best
+  commit inside the pair is m_b, and the contrast problem is two_arm at
+  (m_b - m_c, pair marginal). The m_b ballast is what section 16's verdict
+  demanded: p_bc alone exceeds nu2 on 19.8% of states (the losers' contest
+  outlives both challengers), but exactly there m_b -> -inf and the max
+  discards the term. Ballasted, it is the value of a feasible policy,
+  hence legal.
+
+B is S3-equivariant for free (relabels permute the candidates), zero
+wherever all three pair premia are dead (each u2 carries an architectural
+exact-zero region, so the exact-zero commit region survives the base), and
+EXACT in all three one-arm-dead far fields of section 8 — the limits
+promoted to a global bound. It is also a viscosity subsolution of the full
+HJB, not only a pointwise bound: each drop value satisfies the three-arm
+HJB with equality using only its own edge's candidates, the full-simplex
+max only raises the right side, and a max of subsolutions is a subsolution.
+
+The same construction lifts to the drift pair: dropping an arm in
+three_arm_drift leaves two_arm_drift on the pair, etahat carried through,
+so two_arm_drift.pt is the base for a 3ad sibling.
+
+### The architecture it suggests, and the issues in the way
+
+u = B + c with c >= 0 architectural (envelope times saturated response, as
+everywhere): the correction's target u - B is provably nonnegative, the
+dead solution u = 0 leaves the representable class (B > 0 wherever any
+pair premium is alive, so the never-explore attractor and the all-dead
+absorbing state both die architecturally, and a zero-init correction head
+starts at u = B — far fields exact at step 0), and the correction owns only
+the genuinely three-arm part: the junction region, where the dominant error
+blob already lives. Known issues, decreasing weight:
+
+1. The bound is a theorem for the TRUE u2; the implemented base is the
+   two_arm champion net. Wherever that net overclaims, B_net > u and a
+   positive correction cannot come back down — base error is a hard bias,
+   uncorrectable downward, unlike any loss term. Escape hatches: the
+   constant-shift certificate (learnings 9) — subtract two_arm's
+   sup(residual+)/rho for a certified base — or run the two_arm
+   subsolution program first. Until one lands, "positive correction" is a
+   strong prior, not a certificate.
+2. The max has gradient jumps on its argmax seams; the true u has none
+   (the seams are representation artifacts, not free boundaries). The
+   smoothing fix — the Boltzmann softmax
+   sum(x_i exp(b x_i / scale)) / sum(exp(b x_i / scale)), a convex
+   combination hence <= max at any temperature (logsumexp is the WRONG
+   side) — was the plan and is REFUTED by the step-0 sweep (bare_b.py, since
+   deleted;
+   2026-08-14): fenced median 1.4e3 at b = 3 against 9.0e-6 for the hard
+   max, worsening with b, no basin anywhere. Mechanism, isolated by
+   detaching the softmax weights (residual falls 1.4e4 -> 9.9e-3): the
+   blowup IS the weight-derivative terms. The hard max is locally one
+   candidate everywhere off the measure-zero seam, so its residual is the
+   winning two_arm solution's own; the mixture band's extra derivatives
+   (dw x, d2w x) are new physics the HJB rejects over a finite-measure
+   region, priced at natural-units value scale — the worst points sit at
+   sqrt(det) 1e-3..7e-3 where values run ~30. Even value-only mixing
+   (weights detached, not a legal architecture) costs 250x over hard.
+   Separate trap from the same sweep: normalizing the exponent by the
+   candidate SUM makes B degree-1 homogeneous in the candidates — a cone
+   at the dead corner whose second derivatives diverge like 1/|candidates|
+   along the whole commit boundary; normalize by nu2 if a softmax is ever
+   wanted for something else.
+   VERDICT: the hard max stands. It is the theorem-clean object (a max of
+   subsolutions is a viscosity subsolution; the upward kink is vacuous
+   under the from-above test-function condition), the losses cannot see
+   the seams (collocation and both wall-sampling laws hit them on null
+   sets; measured near-seam decile loss share 0.1%), and the one real
+   cost — the correction cannot cancel the base's gradient jump while
+   staying positive, so u keeps hairline kinks the true solution lacks —
+   is accepted for v1, revisited only if the junction blob demands it.
+3. Input-domain coverage: the base is evaluated at the pair MARGINALS
+   (det/tau_cc etc.), which the three_arm sampler does not directly floor.
+   If they land decades outside two_arm's trained support, the base emits
+   garbage the bound does not cover — the same failure class as 3ad's
+   det-only floor (kb/three_arm_drift.md section 6). Measure the marginal
+   ranges under the three_arm law before training.
+4. The Hamiltonian differentiates through three frozen two_arm net calls
+   per point (2x2 Hessian + three tau derivatives). Section 16 measured
+   the pairwise-basis toll at 1.30x a v1 step, dispatch-bound; expect the
+   same class of cost. The base must be FROZEN — a co-trained base is v2's
+   failure mode again, and the bound story dies with it. Freezing binds
+   the ceiling to the base checkpoint: swapping in a better two_arm later
+   moves B under a trained correction, a retraining event, not a drop-in.
+5. Envelope for the correction: nu2 - B, giving the interpolation form
+   u = (1 - r) B + r nu2 with r in [0, 1) the gated response — BOTH proven
+   bounds architectural at once, conditional on B <= nu2 pointwise. That
+   inequality is a theorem for the true u2 by the section 13 chain
+   (nu(m_b, sd_b) <= nu2, and m_b + nu(-(m_b - m_c), sd_bc) =
+   E[max(theta_b, theta_c)] <= nu2), but the two_arm champion's log_scale
+   is trained to +0.100 (exp 1.105: the response cannot reach 1, so the
+   scale compensates above the proven envelope), so for the NET base it is
+   empirical: measured 2026-08-14 over 65k wedge states, B < nu2 wherever
+   nu2 > 0, max ratio 0.978, q99 0.921. The pinch sits in far fields where
+   the true correction is ~0; on alive states the median B/nu2 is 0.378,
+   so the junction keeps ~60% of nu2 in room against a true triple-point
+   premium of 0.53-0.85 nu2 (section 13). Two costs: the envelope inherits
+   B's seam kinks (hairline, same class as the base's own — see issue 2's
+   verdict), and the alive-start init must NOT be the standard head
+   bias 1 — that starts r at ~0.5, halfway to nu2, discarding the step-0
+   head start; a bias near 0.1 starts alive at ~1% contamination of B.
+6. The base changes the pde term's magnitude and deletes the dead-solution
+   floor argument (the tie losses' breaker role shrinks) — re-derive every
+   auxiliary weight per the house rule.
+
+### Step-0 measurement (2026-08-14; the bare_b.py that made it is deleted)
+
+Bare B — hard max, two_arm.pt (16x16) as u2, correction absent — graded by
+the stock three_arm pde_loss: natural units, POWER = 1, batch 4096, medians
+over 7 draws, champion = three_arm.pt on the SAME draws:
+
+    bare B 1.6e-4 (per-draw spread 2.1e-5 .. 1.4e-3)     champion 8.3e-5
+    fenced to states with all three pair marginals >= two_arm's PRIOR_FLOOR
+    (99.67% of the cloud):        bare B 9.1e-6          champion 7.4e-5
+
+With zero training the base beats the trained champion by 8x on 99.7% of
+the cloud. The unfenced tail is issue 3 realized, and only issue 3: every
+worst point has a pair marginal at 5-8e-4 — below two_arm's sampled
+support, where the response net extrapolates under an exploding nu envelope
+— with single points carrying up to 98% of a draw's loss (the 3ad
+mis-sampling failure class, arriving through the base's INPUT this time).
+The 0.33% of wedge states below the fence exist because the sampler floors
+the pair COORDINATES, not the Schur marginals, which correlation pushes
+under the floor. Issue 2 is priced and small at step 0: the alive-base
+decile nearest a seam carries 0.1% of the loss (the smoothing argument is
+about the correction's training gradients, not this eval). The rest of the
+loss sits where the theory says: exactly 0 on the argmax-dead 52%, and 96%
+of it in the ab-argmax region that contains the junction.
+
+Rulings (2026-08-14): roll with the unfenced law and the two_arm net as
+they are, sub-floor spikes on the watchlist. The base is
+B = max(p_ab, p_ac), hard max, two candidates: on the wedge arm a leads,
+so the drop-a candidate is never a far-field limit and hard-argmaxes on
+only 0.1% of states (its ballast would also drag any average negative),
+and the 0 candidate is redundant among nonnegatives; m_b + p_bc is
+demoted to a correction-net feature, which is where section 16 put p_bc.
+Priced by the sweep: pairs-only 8.922e-6 fenced against 8.924e-6 for all
+four candidates. The Boltzmann temperature sweep that same day refuted
+smoothing entirely (issue 2).
+
+### Implementation (2026-08-14): pinn/problems/three_arm_v3
+
+A CLONE of three_arm (promote or scrub, the v2 contract): sample, simplex
+and loss verbatim, model.py replaced by u = B + exp(log_scale)(nu2 - B) r.
+The base is frozen and EMBEDDED (premium.base.*), so checkpoints are
+self-contained against the aging champion symlink; read_topology reads the
+correction at premium. and the base at premium.base. Bootstrap:
+`pinn init --problem three_arm_v3 --topology 64:64:64 --from
+data/two_arm.pt`; --from a v3 checkpoint resumes, or kink-grafts when
+--topology is also given.
+
+THE FENCE, and what it actually was (2026-08-15). v3's sampler now floors
+all THREE PAIR COORDINATES; three_arm floors the two diagonal entries, which
+leaves the b-c coordinate bare, and the fold then permutes that bare
+coordinate into any slot -- so every Schur marginal reached ~0.5x the floor
+and the two_arm base was called outside its support. Those states were 1.0%
+of the cloud and carried 99.996% of the pde loss (mean residual squared
+1.2e3 against 4.7e-4 fenced); they are the "bobbing" the printed loss showed
+all along, and they are NOT a base-extrapolation artifact -- the two_arm
+clamp (kb/two_arm.md section 9) made them honest in value and WORSE to
+grade, 6.6e-4 -> 1.4e+1, because a tau-frozen shape has chart residual O(1)
+against nu's O(e^s). Flooring the pair coordinates puts every marginal in
+support by construction, no rejection step, and the sampler self-check now
+asserts it before AND after the fold. Result: pde 1.21e-5 with a +/-3%
+spread across draws, where it had been a four-order lottery.
+
+Init lesson, measured: the response head must be ZERO-WEIGHT with bias 0.1,
+not Xavier-with-small-bias. The residual reads derivatives, and a random
+head at 1% VALUE contamination still carries O(1) response derivatives —
+pde 1.4e+1, against 6.6e-4 for the constant-response start. Consequence:
+at step 0 only the head and log_scale receive gradient (the zero weight
+blocks the chain into the hidden stack for one step — the kink_out warmup,
+one level up).
+
+A TEMPERATURE knob (nu2-normalized Boltzmann, T = 0 bitwise the hard max)
+was added and removed the same day. The issue-2 refutation re-ran in
+temperature form at init: T = 1e-4 doubles the fenced median while adding
+a 4e-2-class spike source; T = 1e-3 reads 3.9e+0, T = 1e-2 2.7e+4. A short
+LIVE run at T = 1e-3 showed training eating the band fast (3e+2 -> 1.65 in
+200 iters) -- at T > 0 the defect is smooth, hence representable by the
+correction, which the T = 0 crease is not — so the trained equilibrium was
+never measured and this stays reopenable; the knob itself is deleted, not
+just defaulted off. A checkpoint trained at some T carries no record of it,
+which was the sharpest operational hazard.
+
+Init medians (64:64:64 on the champion base, 7 draws x 4096): pde 6.6e-4,
+control tie 2.1e-2 (the base nearly carries BC1 on its own; dead value
+would be 1.0), treatment tie ~1e-19 — the swap-symmetric max satisfies
+wall 2 IDENTICALLY, as derived — concavity raw 1.8e-6 with violations at
+float-noise depth (median 1e-10; the base is concave). Weights re-derived
+under the band rule alone, v3 having no dead-solution floor: TIE_WEIGHT
+2e-3, CONCAVITY_WEIGHT 1e1, CONCAVITY_SCALE kept at 1e-3 (above the noise
+so it stays linear).
 
 - Nothing mathematical: the problem is fully derived. Remaining work is code
   (the similarity-graded residual per section 14, mirroring two_arm's) and

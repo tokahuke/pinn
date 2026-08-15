@@ -15,7 +15,7 @@ from typing import Self
 from ...net import DeclaresTopology, GainedTanh, parse_topology
 from ...net import read_features, read_topology
 from ...utils import nu
-from .sample import sample_sobol
+from .sample import PRIOR_FLOOR, sample_sobol
 from .simplex import Maximum, maximize_quadratic
 
 # Width of the feature stack in ExplorationPremium.forward.
@@ -118,13 +118,21 @@ class ExplorationPremium(DeclaresTopology):
         )
 
     def forward(self, muhat: Tensor, tauhat: Tensor) -> Tensor:
-        response = self.net(self._features(muhat, tauhat) / self.feature_scale)
+        # Sub-floor states get the floor's shape continued self-similarly:
+        # response at the z-preserving floor state, envelope at the true one
+        # (kb/two_arm.md section 9, which also holds the four constructed
+        # targets this replaced). Binds only off the sampling law.
+        tau_eff = tauhat.clamp_min(PRIOR_FLOOR)
+        response = self.net(
+            self._features(muhat * (tauhat / tau_eff).sqrt(), tau_eff)
+            / self.feature_scale
+        )
         response = response.squeeze(-1)
-        envelope = self.log_scale.exp() * nu(-muhat, tauhat.rsqrt())
 
         response_squared = torch.relu(response) ** 2
+        gated = self.log_scale.exp() * response_squared / (1.0 + response_squared)
 
-        return envelope * response_squared / (1.0 + response_squared)
+        return nu(-muhat, tauhat.rsqrt()) * gated
 
 
 class DimensionlessValueFunction(nn.Module):
@@ -276,6 +284,20 @@ if __name__ == "__main__":
     bound = nu(-muhat, tauhat.rsqrt())
 
     assert (u >= 0).all() and (u <= bound + 1e-6).all()
+
+    # The self-similar continuation below the floor: there the premium in
+    # shape units is a function of z ALONE -- the floor's own shape, frozen
+    # -- so it is identical at every tauhat <= PRIOR_FLOOR and continuous
+    # into the floor itself.
+    z_grid = torch.linspace(0.0, 3.0, 16)
+
+    def shape(tauhat_value: float) -> Tensor:
+        deep = torch.full((16,), tauhat_value)
+
+        return deep.sqrt() * premium(z_grid / deep.sqrt(), deep)
+
+    assert torch.allclose(shape(PRIOR_FLOOR), shape(PRIOR_FLOOR / 16.0), atol=1e-6)
+    assert torch.allclose(shape(PRIOR_FLOOR), shape(PRIOR_FLOOR / 1024.0), atol=1e-6)
 
     v = DimensionlessValueFunction(premium)(muhat, tauhat)
 

@@ -233,18 +233,42 @@ better than any one of them alone.
 6. the two wall samplers each gain `etahat`, since both conditions hold at
    every `etahat`.
 
-**What the code actually imposes (recorded 2026-08-09).** `sample.py` relaxes
-steps 3-4 to the determinant alone, `det T <= det T*` — the part of the
-six-copy cap that is provable and relabel-invariant — with det *placed*
-exactly between floor and ceiling rather than floored per-coordinate
-afterwards (the additive tau floor lifted lopsided states back over the
-ceiling and made the module's self-check flaky). States between the det bound
-and the matrix ellipse are sampled even though the containment argument calls
-them unreachable: extra coverage, not error. The ceiling is additionally
-capped at a static `DET_MAX = 1e3` as `etahat -> 0` (just above the static
-law's reach): left to diverge as `1/etahat^2` it filled 17% of the cloud with
-precision decades the static problem never visits, miscalibrating
-`feature_scale` ~1000x on the raw tau features.
+**What the code actually imposes (recorded 2026-08-13, third cut).**
+`sample.py` relaxes steps 3-4 to the determinant alone, `det T <= det T*` —
+the part of the six-copy cap that is provable and relabel-invariant — imposed
+by capping the common scale: with three_arm's additive `PRIOR_FLOOR` on
+`I_ab` and `I_ac` in place, det is a quadratic in the scale `s`, increasing,
+so clamping `s` at the closed-form root of `det(s) = ceiling` holds BOTH
+bounds exactly, and where the cap does not bind the law is three_arm's term
+for term. Two earlier cuts each trained on a different problem than they
+graded:
+
+- 2026-08-09 drew det as a FRACTION of the ceiling, which diverges as
+  `1/etahat^2`, so the low-drift slice inflated with it: quiet-slice median
+  det 1,250x three_arm's, p05 42,000x, and means 6x small (they are drawn
+  conditionally on det).
+- 2026-08-13 first cut restored the absolute law but moved the floor onto
+  det ("the floor's stated purpose is det anyway" — a misreading of
+  three_arm, whose floor is per pair coordinate; `det >= PRIOR_FLOOR^2` does
+  not imply `I >= PRIOR_FLOOR`). It admits one pair coordinate at 1e-5..1e-7,
+  and the learning numbers carry `(tau/det)^2` — 100x stiffer per decade
+  below the floor — so those states, 18% of the cloud, carried 98% of the
+  pde loss with coefficients ~1e9 on second derivatives:
+  float32-ungradeable even for the exact solution. This was the ~1e0
+  training wall: from-scratch 96:96:96 at lr 1e-3 plateaued at pde ~8-9
+  through 20k and read 5.7 at 30k; the same config with the pair floor
+  restored read 6.4 at 1k and 1.5 at 10k.
+
+The module self-checks now assert the pair floor itself, not its det
+consequence — the assert that catches both cuts (the det-quantile match on
+the quiet slice passed the broken law forever, because det matched while the
+shape did not). States between the det bound and the matrix ellipse are
+still sampled even though the containment argument calls them unreachable:
+extra coverage, not error. The ceiling is additionally capped at a static
+`DET_MAX = 1e3` as `etahat -> 0` (just above the static law's reach): left
+to diverge as `1/etahat^2` it filled 17% of the cloud with precision decades
+the static problem never visits, miscalibrating `feature_scale` ~1000x on
+the raw tau features.
 
 ## 7. The envelope
 

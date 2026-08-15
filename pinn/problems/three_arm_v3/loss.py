@@ -1,6 +1,9 @@
 """
-Losses for the three-arm drift problem: the interior HJB residual, the two tie
-losses of doc section 5, and the trainer-facing objective.
+Losses for the three-arm v3 problem, cloned verbatim from three_arm (the
+architecture change lives in model.py); only the auxiliary weights are
+re-derived, since v3's pde starts four orders below v1's and the
+never-explore degeneracy is unrepresentable (u >= B > 0 wherever any pair
+premium is alive).
 """
 
 from __future__ import annotations
@@ -12,56 +15,110 @@ import torch.nn as nn
 from torch import Tensor
 
 from ...train import Objective
-from ..three_arm.loss import directional_learning, on_device
 from .model import DimensionlessValueFunction
 from .sample import RidgeSample, Sample
 
-# Dead-solution floor, three_arm's rule, against the MEDIAN pde over several
-# draws -- the previous 1.9e4 came from a single heavy-tailed draw reading 187
-# where the median is 2.4, and left the ties at 135% of the equation.
-TIE_WEIGHT = 2.4e2
+# v3 has NO dead-solution floor: never-explore is outside the class, so the
+# ties are boundary conditions, not degeneracy breakers. Medians at init
+# (2026-08-15, fresh 64:64:64 on the champion base, fenced law): pde 1.21e-5;
+# control tie 2.2e-2, an identity error of 0.148 on an O(1) condition -- the
+# base is BAD at the wall, and it is the one curve worth watching fall;
+# treatment tie ~1e-18, satisfied IDENTICALLY by the swap-symmetric max base,
+# so its weight is inert.
+#
+# CALIBRATED ON GRADIENT SHARE, not value share: in v3 the two disagree by
+# orders, because the base makes pde tiny while leaving the wall wrong, and
+# the gated correction can barely move the wall at init (tie gradient was
+# 0.00% of the total at the value-calibrated 3e-5). The 1-10% value band
+# applies to a term near satisfaction, not to a boundary condition starting
+# this far off.
+#
+# The wall is REACHABLE, not hard: the v1 champion sits at control_tie
+# 1.2e-6 (identity error 0.001) on the same fenced draws, at its own
+# TIE_WEIGHT of 10 -- three orders above this one. v1 needs that weight
+# because there the tie is the degeneracy breaker; v3 retired that role and
+# the weight was calibrated down with it, too far. Measured here: 1e-1 gives
+# ~30% of the pde gradient and moved the identity error 0.141 -> 0.065 in
+# 10k iterations, while 1e-2 gives 2.2% and stalled it (5.6e-3 -> 5.2e-3
+# over 6.8k). The term is self-limiting -- its share falls as it is
+# satisfied, which is why v1's weight of 10 still leaves the tie at only
+# ~22% of its pde at convergence -- so ESCALATE if it stalls again rather
+# than easing off. The 2026-08-15 easing to 1e-2 was reverted: the pde
+# climb that motivated it was the one-sided gate forbidding downward
+# corrections at the wall, and the two-sided gate removed that.
+TIE_WEIGHT = 1.0e-1
 
 # Plain mean-of-squares. P = 2 compensated for the chart weight's suppressed
 # tail; in natural units it over-corrects, dropping the effective sample size
 # at batch 4096 to 2.1 points on three_arm (54 at P = 1).
 POWER = 1.0
 
-# Concavity, three_arm's term verbatim -- the erosion is control-free, so the
-# drift Hessian is the static one, and the SCALE is three_arm's too. It sat at
-# 1e-1 until 2026-08-13 "because this net is far from converged", which made
-# violation mean something different in the two problems and left the terms
-# incomparable across the pair.
+# Concavity: L[f] >= 0 for every contrast direction, provable at the answer and
+# invisible to the residual, so it moves the path and not the fixed point.
+# Every v3 violation is FAR below CONCAVITY_SCALE (21% of points violate, at
+# 1e-11 to 1e-8, against |L| itself ~4e-9), so the saturation never engages
+# and the term is linear with slope 1/SCALE = 1000. What matters is then the
+# product WEIGHT/SCALE, the effective linear coefficient: at 4/1e-3 it took
+# 99.98% of the total parameter gradient while being 5% of the loss VALUE --
+# a miscalibration the value band cannot see. 5e-5/1e-3 puts it at ~5% of the
+# pde gradient. Re-measure the GRADIENT split, not the value split, after any
+# change here.
 CONCAVITY_SCALE = 1.0e-3
-# Calibrated on the MEDIAN pde over seven draws, not one: the pde varies
-# several-fold between batches and a single-draw calibration put this at 730%
-# of it. Target ~5%; re-derived 2026-08-13 against the pair-floor fence in
-# sample.py, which cut the champion's median pde ~2x more and left the old
-# 1.2 at 28% of the equation. TIE_WEIGHT remeasured at the same time: 4.8%
-# and still 2.2x the 100x dead-solution floor, kept.
-CONCAVITY_WEIGHT = 2.2e-1
+CONCAVITY_WEIGHT = 5.0e-5
+
+
+def directional_learning(
+    l_ab: Tensor, l_ac: Tensor, l_bc: Tensor, theta: Tensor
+) -> Tensor:
+    """
+    The learning operator along the contrast direction at angle theta of the
+    (b, c) tangent chart: the Hamiltonian's negated Hessian as a quadratic
+    form, L[f] = f' M f with M = [[l_ab, h], [h, l_ac]],
+    h = (l_ab + l_ac - l_bc)/2. The pair directions are theta = 0 (l_ab),
+    pi/2 (l_ac), and 3pi/4 (l_bc / 2).
+
+    Linear in the learning numbers, so it is smooth everywhere and its
+    gradient scale does not depend on their magnitude -- the property the
+    eigenvalue form loses to its sqrt (whose tie set is the entire contact
+    set; the clamped version silently pays to un-flatten the dead region).
+    """
+    h = 0.5 * (l_ab + l_ac - l_bc)
+    along_b, along_c = torch.cos(theta), torch.sin(theta)
+
+    return l_ab * along_b**2 + l_ac * along_c**2 + 2.0 * h * along_b * along_c
 
 
 def pde_loss(value: DimensionlessValueFunction, draw: Sample) -> tuple[Tensor, Tensor]:
     """
     Returns TWO numbers. The first is the interior HJB residual in value form
-    (doc section 2; the static pieces in three_arm.md sections 4, 7, 10),
-    units rho = sigma = 1, i.e. the dimensionless form (doc section 4):
+    (doc sections 4, 7, 10), units rho = sigma = 1, i.e. the dimensionless
+    form (doc section 11):
     v = max over the simplex of alpha.m + pairwise learning terms; graded in
-    the equation's OWN units, never scaled (three_arm/loss.py holds the rule).
+    the equation's OWN units, never scaled (see the standing rule below).
 
     KNOWN DEGENERATE on its own: the commit envelope v = max(0, m_b, m_c)
     zeroes this residual exactly (the never-explore solution), just as the
     two_arm residual was degenerate before BC1. The tie losses of doc
-    section 5 break the degeneracy.
+    section 12 break the degeneracy.
 
-    The second is the sampled-direction concavity term, three_arm's verbatim
-    (see three_arm/loss.py:pde_loss for the derivation and design record) --
-    the erosion is control-free and never touches the Hamiltonian's Hessian.
+    The second is the concavity term: mean of relu(-L[f]) along ONE freshly
+    sampled contrast direction per point. Concavity of the simplex quadratic
+    is L[f] >= 0 for EVERY direction f (derived 2026-08-08), provable at the
+    answer by the mean-preserving-spread argument, and pairwise positivity
+    alone misses ~3x of the violations (champion: 93.1% pairwise-positive,
+    78.5% concave). The direction is redrawn every step, so the population
+    loss vanishes exactly on concavity -- the same trick the collocation
+    cloud plays with space. LINEAR in the violation, not squared, for the
+    pos_learning reason: the policy reads the SIGN. Sampled on the wedge's
+    own chart; the zero set (concavity) is chart-invariant even though the
+    angular weighting is not. Zero on the never-explore solution -- all
+    three learning numbers vanish -- so it neither breaks nor deepens the
+    degeneracy.
     """
     # The derivation (learning numbers, Hamiltonian, simplex max) lives on
     # the model: one chain serves training and policy readout.
     v, best, (l_ab, l_ac, l_bc) = value.hamiltonian(
-        draw.m_b, draw.m_c, draw.tau_bb, draw.tau_bc, draw.tau_cc, draw.etahat
+        draw.m_b, draw.m_c, draw.tau_bb, draw.tau_bc, draw.tau_cc
     )
     theta = torch.rand_like(l_ab) * math.pi
     violation = torch.relu(-directional_learning(l_ab, l_ac, l_bc, theta))
@@ -72,8 +129,12 @@ def pde_loss(value: DimensionlessValueFunction, draw: Sample) -> tuple[Tensor, T
     # s sits just above the median violation, so lower it as the net converges.
     concavity = (violation / (CONCAVITY_SCALE + violation)).mean()
 
-    # NATURAL UNITS, NEVER SCALED -- the premium-units weight is gone, and the
-    # standing rule against reintroducing one lives in three_arm/loss.py.
+    # NATURAL UNITS, NEVER SCALED. This once graded in similarity PREMIUM
+    # units, det**0.75 / (tau_bb + tau_cc + tau_bc), to keep the never-explore
+    # mode loud at low information. Gone: a chart-derived weight on the
+    # residual is an undeclared reweighting of the domain (learnings section
+    # 3). The degeneracy it defended is the tie losses' job; if a dead
+    # Hamiltonian scores well again, strengthen the breaker, not the thumb.
     #
     # Power-mean attention (learnings section 7); at POWER = 1 this is plain
     # mean-of-squares. Normalized by the detached batch mean so pow(P) sees
@@ -89,7 +150,7 @@ def pde_loss(value: DimensionlessValueFunction, draw: Sample) -> tuple[Tensor, T
 
 def control_tie_loss(value: DimensionlessValueFunction, draw: RidgeSample) -> Tensor:
     """
-    Wall condition on the control tie {m_b = 0} (doc section 5), the
+    Wall condition on the control tie {m_b = 0} (doc section 12), the
     degeneracy breaker. Pair-sampled: each wall point is scored together with
     its mirror under the a<->b relabel,
 
@@ -101,9 +162,7 @@ def control_tie_loss(value: DimensionlessValueFunction, draw: RidgeSample) -> Te
     here).
     """
     m_b = torch.zeros_like(draw.mean).requires_grad_(True)
-    u = value.premium(
-        m_b, draw.mean, draw.tau_bb, draw.tau_bc, draw.tau_cc, draw.etahat
-    )
+    u = value.premium(m_b, draw.mean, draw.tau_bb, draw.tau_bc, draw.tau_cc)
     (normal,) = torch.autograd.grad(
         u.sum(), m_b, create_graph=True, allow_unused=True, materialize_grads=True
     )
@@ -118,7 +177,6 @@ def control_tie_loss(value: DimensionlessValueFunction, draw: RidgeSample) -> Te
         draw.tau_bb + 2.0 * draw.tau_bc + draw.tau_cc,
         -(draw.tau_bc + draw.tau_cc),
         draw.tau_cc,
-        draw.etahat,
     )
     mirror_normal, mirror_tangent = torch.autograd.grad(
         mirror_u.sum(),
@@ -133,7 +191,7 @@ def control_tie_loss(value: DimensionlessValueFunction, draw: RidgeSample) -> Te
 
 def treatment_tie_loss(value: DimensionlessValueFunction, draw: RidgeSample) -> Tensor:
     """
-    Wall condition on the treatment tie {m_b = m_c} (doc section 5), the
+    Wall condition on the treatment tie {m_b = m_c} (doc section 12), the
     mirror condition. Pair-sampled under the b<->c swap,
 
         d_n U(s) + d_n U(s') = 0,    d_n = d/dm_b - d/dm_c
@@ -145,7 +203,7 @@ def treatment_tie_loss(value: DimensionlessValueFunction, draw: RidgeSample) -> 
     def crossing_derivative(tau_bb: Tensor, tau_bc: Tensor, tau_cc: Tensor) -> Tensor:
         m_b = draw.mean.clone().requires_grad_(True)
         m_c = draw.mean.clone().requires_grad_(True)
-        u = value.premium(m_b, m_c, tau_bb, tau_bc, tau_cc, draw.etahat)
+        u = value.premium(m_b, m_c, tau_bb, tau_bc, tau_cc)
         along_b, along_c = torch.autograd.grad(
             u.sum(),
             [m_b, m_c],
@@ -188,6 +246,15 @@ def loss(
     )
 
 
+def on_device(state: Sample | RidgeSample, device: str):
+    """
+    A draw moved to the trainer's device, field by field. Dataclasses of
+    tensors, so the same reconstruct-from-vars trick the self-checks use for
+    cloning; field order is the constructor's.
+    """
+    return type(state)(*(field.to(device) for field in vars(state).values()))
+
+
 def draw(batch: int, device: str = "cpu") -> tuple:
     """
     One step's collocation samples, in loss()'s argument order: every training
@@ -225,73 +292,46 @@ if __name__ == "__main__":
 
     class _ZeroPremium(nn.Module):
         def forward(self, m_b: Tensor, *rest: Tensor) -> Tensor:
-            # 0 * m_b * everything, not zeros_like: keeps the output
-            # graph-connected through EVERY input, including the precisions
-            # the erosion term differentiates and etahat itself. Autograd
-            # refuses to start from a constant (CLAUDE.md traps).
-            product = m_b
-            for field in rest:
-                product = product * field
+            # 0 * m_b, not zeros_like: keeps the output graph-connected so
+            # the tie losses can differentiate it.
+            return 0.0 * m_b
 
-            return 0.0 * product
-
-    # Zero premium solves the interior PDE exactly at every drift -- the
-    # documented degeneracy, which doubles as the end-to-end test of the
-    # derivative -> L -> erosion -> Hamiltonian pipeline. Run across the
-    # etahat range: the erosion is the only new term and this is what says it
-    # was wired up at all.
+    # The commit envelope solves the interior PDE exactly (the documented
+    # degeneracy), which doubles as an end-to-end test of the derivative ->
+    # L -> Hamiltonian pipeline: zero premium must give ~zero pde loss. The
+    # concavity term must be EXACTLY silent on it (all learning numbers are
+    # 0, relu(-0) contributes nothing): it cannot break or deepen the
+    # degeneracy, and there is no clamp residue to tolerate.
     zero = DimensionlessValueFunction(_ZeroPremium())
+    envelope_loss, envelope_concavity = pde_loss(zero, Sample.draw(2048))
 
-    for etahat in [0.0, 1.0, 10.0, 35.0]:
-        batch = Sample.draw(2048)
-        batch.etahat = torch.full_like(batch.etahat, etahat)
-        envelope_loss, envelope_concavity = pde_loss(zero, batch)
+    assert envelope_loss.item() < 1e-8, envelope_loss.item()
+    assert envelope_concavity.item() == 0.0, envelope_concavity.item()
 
-        assert envelope_loss.item() < 1e-8, (etahat, envelope_loss.item())
+    # The directional form: pair directions are its anchors, and it fires
+    # exactly on the negative cone.
+    one = torch.ones(4)
 
-        # Concavity is EXACTLY silent on the degenerate solution at every
-        # drift: all learning numbers are 0, no clamp residue to tolerate.
-        assert envelope_concavity.item() == 0.0, (etahat, envelope_concavity.item())
-
-    # The erosion coefficients against the matrix form: with a premium linear
-    # in ONE precision entry, left - v is exactly that entry's erosion
-    # coefficient, which must equal T etahat^2 (I + 11') T -- off-diagonal
-    # with coefficient one, the independent-entry chain-rule convention. The
-    # only runnable pin on the erosion FORMULA: the S3 test below cannot tell
-    # it from any other invariant (a dropped v v^T part, an etahat**4).
-    class _PickTau(nn.Module):
-        def __init__(self, index: int) -> None:
-            super().__init__()
-
-            self.index = index
-
-        def forward(self, m_b: Tensor, m_c: Tensor, *taus: Tensor) -> Tensor:
-            connected = m_b * m_c
-            for field in taus:
-                connected = connected * field
-
-            return taus[self.index] + 0.0 * connected
-
-    wide = Sample(*(field.double() for field in vars(Sample.draw(512)).values()))
-    wide.etahat = torch.full_like(wide.etahat, 7.5)
-    precision = torch.stack(
-        [
-            torch.stack([wide.tau_bb, wide.tau_bc], -1),
-            torch.stack([wide.tau_bc, wide.tau_cc], -1),
-        ],
-        dim=-2,
+    # l_bc = 4 != l_ab + l_ac, so h != 0 and the third identity pins the
+    # cross term, not just the diagonal.
+    assert torch.allclose(
+        directional_learning(1.0 * one, 2.0 * one, 4.0 * one, torch.zeros(4)), one
     )
-    spread = wide.etahat[:, None, None] ** 2 * (torch.eye(2, dtype=torch.float64) + 1.0)
-    reference = precision @ spread @ precision
-
-    for index, (row, col) in enumerate([(0, 0), (0, 1), (1, 1)]):
-        picked = DimensionlessValueFunction(_PickTau(index))
-        state = (wide.m_b, wide.m_c, wide.tau_bb, wide.tau_bc, wide.tau_cc, wide.etahat)
-        left, _, _ = picked.hamiltonian(*state)
-
-        assert torch.allclose(
-            left - picked(*state), reference[:, row, col], rtol=1e-10
-        ), index
+    assert torch.allclose(
+        directional_learning(
+            1.0 * one, 2.0 * one, 4.0 * one, torch.full((4,), math.pi / 2.0)
+        ),
+        2.0 * one,
+    )
+    assert torch.allclose(
+        directional_learning(
+            1.0 * one, 2.0 * one, 4.0 * one, torch.full((4,), 3.0 * math.pi / 4.0)
+        ),
+        2.0 * one,
+    )
+    assert (
+        directional_learning(-1.0 * one, -1.0 * one, -2.0 * one, torch.zeros(4)) < 0
+    ).all()
 
     # The tie losses on the zero premium, both exact: the control tie reads
     # (0 + 0 + 0 - 1)^2 = 1 -- the degeneracy breaker doing its job -- and
@@ -342,7 +382,7 @@ if __name__ == "__main__":
         def __init__(self) -> None:
             super().__init__()
 
-            self.head = nn.Linear(6, 1)
+            self.head = nn.Linear(5, 1)
 
         def forward(self, *state: Tensor) -> Tensor:
             return self.head(torch.stack(state, dim=-1)).squeeze(-1).tanh()
@@ -360,31 +400,20 @@ if __name__ == "__main__":
     assert all(g is not None and g.isfinite().all() for g in gradients)
     assert tiny_loss.item() > 0
 
-    # Full-loss S3 test (three_arm.md section 6): with an invariant premium (det T is
+    # Full-loss S3 test (doc section 6): with an invariant premium (det T is
     # preserved by the relabel congruences), the loss must be identical on a
     # relabeled batch. Exercises the derivative chain, the L assembly, the
     # Hamiltonian mapping, and the solver in one identity.
     class _InvariantPremium(nn.Module):
         def forward(
-            self,
-            m_b: Tensor,
-            m_c: Tensor,
-            tbb: Tensor,
-            tbc: Tensor,
-            tcc: Tensor,
-            etahat: Tensor,
+            self, m_b: Tensor, m_c: Tensor, tbb: Tensor, tbc: Tensor, tcc: Tensor
         ) -> Tensor:
-            return ((tbb * tcc - tbc**2) * (1.0 + etahat)).tanh()
+            return (tbb * tcc - tbc**2).tanh()
 
-    # Run with the drift ON. E is unchanged by shuffling arm labels, so the
-    # erosion has to be too -- this is the cheapest possible test that the
-    # three erosion entries were assembled symmetrically, and it fails if any
-    # of them is transposed or mis-paired.
     invariant = DimensionlessValueFunction(_InvariantPremium())
     batch = Sample.draw(2048)
-    batch.etahat = torch.full_like(batch.etahat, 7.5)
     swapped = Sample(  # b <-> c relabel
-        batch.m_c, batch.m_b, batch.tau_cc, batch.tau_bc, batch.tau_bb, batch.etahat
+        batch.m_c, batch.m_b, batch.tau_cc, batch.tau_bc, batch.tau_bb
     )
     relabeled = Sample(  # a <-> b relabel: m -> Jm, T -> J^T T J
         -batch.m_b,
@@ -392,25 +421,22 @@ if __name__ == "__main__":
         batch.tau_bb + 2.0 * batch.tau_bc + batch.tau_cc,
         -(batch.tau_bc + batch.tau_cc),
         batch.tau_cc,
-        batch.etahat,
     )
 
     def clone(state: Sample) -> Sample:
         return Sample(*(field.detach().clone() for field in vars(state).values()))
 
     # The graded residual only: the concavity term draws a fresh direction
-    # per call (only its zero set is chart-invariant).
+    # per call, so per-draw values differ across relabels (only its zero set
+    # is chart-invariant).
     original_loss, _ = pde_loss(invariant, clone(batch))
     swapped_loss, _ = pde_loss(invariant, clone(swapped))
     relabeled_loss, _ = pde_loss(invariant, clone(relabeled))
 
-    # RELATIVE tolerance, not absolute: the natural-units loss is no longer a
-    # fixed-size number (it moved 4 orders on 2026-08-10 and moves again with
-    # every checkpoint), so an atol calibrated at one magnitude is meaningless
-    # at another -- the old atol=1e-4 flaked one run in three. Relative is also
-    # the honest float32 budget for a tail-dominated mean over a double-backward
-    # chain: measured agreement is 1e-7 to 1e-5. Nothing is lost in detection --
-    # a transposed or mis-paired erosion entry moves this by O(1) or more.
+    # RELATIVE tolerance: the natural-units loss is no longer a fixed-size
+    # number, so an atol calibrated at one magnitude means nothing at another
+    # (see three_arm_drift/loss.py, where the old atol flaked one run in
+    # three). A real S3 bug moves this by O(1), so nothing is lost.
     assert torch.allclose(swapped_loss, original_loss, rtol=1e-3, atol=1e-9), (
         swapped_loss.item(),
         original_loss.item(),

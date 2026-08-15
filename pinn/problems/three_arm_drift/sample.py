@@ -23,12 +23,6 @@ PRECISION_MEAN = 2.0
 SCALE_DECADES = 3.0
 MEAN_SCALE = 2.0
 
-# Additive fence on the three SHAPE draws, so a triple-near-zero chi-squared
-# cannot send the ceiling multiplier to infinity. Relative, not absolute: the
-# state is scaled to the ceiling right after, so an absolute floor here would
-# mean a different thing at every etahat.
-SHAPE_FLOOR = 1e-3
-
 # Absolute cap on the det ceiling as etahat -> 0 (two_arm_drift's TAUHAT_MAX,
 # det edition): the ceiling diverges as 1/etahat^2, and uncapped it put 17% of
 # the cloud beyond det ~ 1e2 (up to 3.8e12, measured 2026-08-09) -- decades
@@ -193,8 +187,9 @@ def _precision_from_uniforms(
     etahat: Tensor,
 ) -> tuple[Tensor, Tensor, Tensor]:
     """
-    Uniforms -> pairwise precisions -> precision entries: three_arm's law,
-    clipped at the drift ceiling.
+    Uniforms -> pairwise precisions -> precision entries: three_arm's law with
+    its additive PRIOR_FLOOR on the a-b and a-c pair coordinates, and the
+    drift ceiling imposed by capping the common scale.
 
     Drift caps how much can ever be known: what you buy stops keeping up with
     what the wandering destroys, and the cap has a shape, not just a size (doc
@@ -203,54 +198,55 @@ def _precision_from_uniforms(
 
         det T  <=  det T*  =  1 / (2 sqrt3 etahat^2)
 
-    The three chi-squared draws set only the SHAPE of T; three_arm's own scale
-    law sizes it, and the ceiling only CLIPS -- so where drift does not bind
-    this sampler IS three_arm's, and the clipped mass lands on the ceiling
-    where trajectories converge.
+    Both fences are exact and neither is traded for the other: with the floor
+    in place det is a quadratic in the scale s, increasing in s,
 
-    Drawing a FRACTION of the ceiling instead (until 2026-08-13) made every
-    state ceiling-relative, so the low-drift slice inflated with the ceiling
-    rather than matching the static problem: at etahat < 0.01 its median det
-    was 1,250x three_arm's and its p05 42,000x, which pushed the means 6x
-    small (they are drawn conditionally on det). The net trained on
-    high-information states and was graded on the stiff low-information ones.
+        det(s) = shape_det s^2
+               + PRIOR_FLOOR (shape_ab + shape_ac + 2 shape_bc) s
+               + PRIOR_FLOOR^2,
 
-    Placing det rather than flooring the pair coordinates afterwards is what
-    makes both bounds EXACT. three_arm floors the taus additively, which under
-    drift lifts a lopsided state back over the ceiling -- measured at 0.89% of
-    the cloud, and it made this module's own check flaky 5 runs in 10. The
-    floor's stated purpose in three_arm is det anyway ("keeps det T >=
-    PRIOR_FLOOR**2"), so imposing it on det directly is the same intent without
-    the failure mode. The shapes get a small additive fence of their own so a
-    triple-near-zero draw cannot send the multiplier to infinity.
+    so clamping s at the root of det(s) = ceiling enforces the ceiling exactly
+    while the floor holds at every s. Where the cap does not bind this IS
+    three_arm's law term for term, which is the etahat -> 0 anchor.
+
+    The floor sits on the PAIR coordinates, not on det (the 2026-08-13 fence:
+    "the floor's stated purpose is det anyway" read three_arm wrong). det >=
+    PRIOR_FLOOR**2 admits states with one pair coordinate at 1e-5..1e-7, and
+    the learning numbers carry (tau/det)^2 -- 100x stiffer per decade below
+    the floor. Measured on the 2026-08-13 champion: such states were 18% of
+    the cloud carrying 98% of the pde loss (coefficients ~1e9 on second
+    derivatives, float32-ungradeable even for the exact solution), a loss
+    floor no net can descend; the same batch fenced at the floor graded 40x
+    lower.
     """
-    shape_ab = chi_squared_1(u_ab) + SHAPE_FLOOR
-    shape_ac = chi_squared_1(u_ac) + SHAPE_FLOOR
-    shape_bc = chi_squared_1(u_bc) + SHAPE_FLOOR
-
-    # det of the unscaled shape, in pair coordinates.
-    shape_det = shape_ab * shape_ac + shape_bc * (shape_ab + shape_ac)
-
-    # three_arm's own scale law, ABSOLUTE, and its det.
-    scale = PRECISION_MEAN * decade_scale(u_scale, SCALE_DECADES)
-    static_det = scale**2 * shape_det
+    shape_ab = chi_squared_1(u_ab)
+    shape_ac = chi_squared_1(u_ac)
+    shape_bc = chi_squared_1(u_bc)
 
     # etahat floored where the drift ceiling meets the static cap DET_MAX, so
     # the etahat -> 0 anchor stays inside the decades training can see.
     ceiling_det = 1.0 / (
         2.0 * SQRT3 * etahat.clamp_min((2.0 * SQRT3 * DET_MAX) ** -0.5) ** 2
     )
-    target_det = static_det.clamp(max=ceiling_det).clamp_min(PRIOR_FLOOR**2)
 
-    # det scales as the square, so the linear multiplier is the square root.
-    multiplier = (target_det / shape_det).sqrt()
+    # The larger root of det(s) = ceiling, in the form that stays finite when
+    # a triple-near-zero shape sends both coefficients toward 0. excess > 0
+    # always: the ceiling bottoms out at 2.4e-4 (etahat 35), 240x the floor's
+    # det.
+    quad = shape_ab * shape_ac + shape_bc * (shape_ab + shape_ac)
+    lin = PRIOR_FLOOR * (shape_ab + shape_ac + 2.0 * shape_bc)
+    excess = ceiling_det - PRIOR_FLOOR**2
+    cap = 2.0 * excess / (lin + (lin**2 + 4.0 * quad * excess).sqrt())
 
-    pair_bc = multiplier * shape_bc
+    scale = PRECISION_MEAN * decade_scale(u_scale, SCALE_DECADES)
+    s = torch.minimum(scale, cap)
+
+    pair_bc = s * shape_bc
 
     return (
-        multiplier * shape_ab + pair_bc,
+        s * shape_ab + PRIOR_FLOOR + pair_bc,
         -pair_bc,
-        multiplier * shape_ac + pair_bc,
+        s * shape_ac + PRIOR_FLOOR + pair_bc,
     )
 
 
@@ -260,11 +256,12 @@ if __name__ == "__main__":
     assert draw.m_b.shape == draw.tau_bc.shape == draw.etahat.shape == (20000,)
     assert (draw.tau_bc <= 0).all()
 
-    # Pair coordinates strictly inside the box. The floor moved onto det (see
-    # _precision_from_uniforms), so these are only required positive -- an
-    # absolute floor on them is what broke the ceiling.
-    assert (draw.tau_bb + draw.tau_bc > 0).all()
-    assert (draw.tau_cc + draw.tau_bc > 0).all()
+    # The stiffness fence, three_arm's: the a-b and a-c pair coordinates carry
+    # the additive floor at EVERY drift. Regression test for the det-only
+    # floor (see _precision_from_uniforms), whose sub-floor states carried 98%
+    # of the pde loss.
+    assert (draw.tau_bb + draw.tau_bc >= PRIOR_FLOOR - 1e-6).all()
+    assert (draw.tau_cc + draw.tau_bc >= PRIOR_FLOOR - 1e-6).all()
     assert (draw.etahat >= 0.0).all() and (draw.etahat <= ETAHAT_MAX).all()
 
     det = draw.tau_bb * draw.tau_cc - draw.tau_bc**2
@@ -278,10 +275,10 @@ if __name__ == "__main__":
     # clamps.
     ratio = 2.0 * SQRT3 * draw.etahat**2 * det
 
-    # Exact in exact arithmetic -- det is placed, not floored. The slack is
-    # float32: det is a difference of similar numbers when the b-c pair
-    # dominates, which costs about four digits (three_arm's own det check is
-    # in float64 for the same reason). Measured worst excess 1.6e-4.
+    # Exact in exact arithmetic -- the scale is clamped at the root of
+    # det(s) = ceiling. The slack is float32: det is a difference of similar
+    # numbers when the b-c pair dominates, which costs about four digits
+    # (three_arm's own det check is in float64 for the same reason).
     assert (ratio <= 1.0 + 1e-3).all(), ratio.max().item()
 
     # The ceiling CLIPS, it does not SIZE. Where drift is negligible nothing
@@ -342,8 +339,8 @@ if __name__ == "__main__":
     for wall in (RidgeSample.control_tie(2000), RidgeSample.treatment_tie(2000)):
         wall_det = wall.tau_bb * wall.tau_cc - wall.tau_bc**2
         assert (wall.mean <= 0).all() and (wall.tau_bc <= 0).all()
-        assert (wall.tau_bb + wall.tau_bc > 0).all()
-        assert (wall.tau_cc + wall.tau_bc > 0).all()
+        assert (wall.tau_bb + wall.tau_bc >= PRIOR_FLOOR - 1e-6).all()
+        assert (wall.tau_cc + wall.tau_bc >= PRIOR_FLOOR - 1e-6).all()
         assert (wall_det >= PRIOR_FLOOR**2 * 0.99).all(), wall_det.min().item()
         assert (wall_det <= DET_MAX * 1.001).all(), wall_det.max().item()
         assert (2.0 * SQRT3 * wall.etahat**2 * wall_det <= 1.0 + 1e-3).all()

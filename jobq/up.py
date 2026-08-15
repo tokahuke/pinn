@@ -31,16 +31,35 @@ IMAGE = "runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404"
 # against 2100); Ada's scheduler does the rest on small kernels. L4 and A40
 # are UNMEASURED fallbacks, listed only so a create still lands when the
 # first two are dry.
+# Work per dollar on the same benchmark, community prices 2026-08-15:
+#
+#     RTX 4000 Ada  20.5 ms/step   $0.20   1.00 (reference)
+#     RTX 4090      14.5 ms/step   $0.34   0.83
+#     RTX A6000     46.7 ms/step   $0.33   0.27
+#
+# The small Ada card WINS despite being 1.41x slower, because the step is
+# dispatch-bound: SM count barely matters, scheduler generation and clock do
+# the work, and this card carries the SAME 3105 MHz max SM clock as the 4090
+# on a third of the silicon. That is why Ampere (A6000, A5000, 3090) stays
+# last however cheap it looks. The remaining Ada/Blackwell entries are
+# UNMEASURED, listed by price so a create still lands when the first two are
+# dry -- the catalog lists types, not stock, and four candidates was too thin
+# a walk (all four dry, 2026-08-15).
 GPUS = (
-    "NVIDIA GeForce RTX 4090",
-    "NVIDIA RTX A6000",
+    "NVIDIA RTX 4000 Ada Generation",  # $0.20, measured 20.5 ms/step
+    "NVIDIA GeForce RTX 4090",  # $0.34, measured 14.5 ms/step
+    "NVIDIA GeForce RTX 4070 Ti",  # $0.19
+    "NVIDIA GeForce RTX 4080 SUPER",  # $0.28
+    "NVIDIA GeForce RTX 5080",  # $0.39, Blackwell
+    "NVIDIA GeForce RTX 5090",  # $0.69, Blackwell
+    "NVIDIA RTX A6000",  # $0.33, measured 46.7 ms/step
     "NVIDIA A40",
     "NVIDIA L4",
 )
 
 
 @click.command()
-@click.option("--name", default="pinn", show_default=True)
+@click.option("--pod", "name", default="pinn", show_default=True)
 @click.option(
     "--gpu",
     default=None,
@@ -50,10 +69,12 @@ GPUS = (
 @click.option("--disk", default=25, show_default=True, help="Container disk, GiB.")
 @click.option(
     "--cloud",
-    type=click.Choice(["SECURE", "COMMUNITY"]),
-    default="SECURE",
+    type=click.Choice(["COMMUNITY", "SECURE"]),
+    default="COMMUNITY",
     show_default=True,
-    help="COMMUNITY is ~40% cheaper for the same card; it is other people's machines, so treat interruption as possible.",
+    help="COMMUNITY is other people's machines at ~half the price; the backup "
+    "daemon and best-EMA saves make interruption survivable (kb/jobq.md). "
+    "SECURE buys dedicated hosts at ~2x.",
 )
 @click.option(
     "--idle",
@@ -117,7 +138,10 @@ def up(
             if "error" not in pod:
                 break
         else:
-            raise click.ClickException("no gpu type had stock; try --cloud COMMUNITY")
+            raise click.ClickException(
+                "no gpu type had stock; try --gpu with an exact id, "
+                "or --cloud SECURE"
+            )
     else:
         # `up` means "make a working pod exist", so a stopped one is adopted
         # rather than refused. Nothing else starts a pod: run, cp and backup

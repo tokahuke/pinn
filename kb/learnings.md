@@ -110,7 +110,20 @@ the loss. A loss term negotiates; an architecture guarantees.
   Push floors down to numerical-stability territory and let the use case,
   not the sampler, decide where to read the solution. Concede decades only
   on use-case grounds (nobody starts 100 sd agnostic).
-- **Measure before adding samplers — in both directions.** Every "stubborn
+- **Floor the stiffness-bearing coordinate, and self-check the floor, not a
+  consequence of it (2026-08-13).** three_arm floors each pair coordinate;
+  its drift sibling restated this as `det >= floor^2`, which the floor
+  implies but does not follow from — one pair coordinate could sit 2-4
+  decades below the fence. The equation's coefficients carry `(tau/det)^2`,
+  100x per decade, so those states (18% of the cloud) were
+  float32-ungradeable and carried 98% of the pde loss: an invisible ~1e0
+  loss wall, diagnosed only by bucketing the residual by min pair
+  coordinate on the trained net. The self-checks asserted the det
+  consequence plus a quiet-slice det-QUANTILE match against the static law,
+  and both passed the broken law forever (det matched; the shape did not).
+  Asserting the floored quantity itself fails in one run. Fence restored,
+  the same from-scratch config went from plateauing at pde ~8 to 1.5 at
+  10k iterations. Every "stubborn
   region" we hit was EITHER unvisited (fix: sampling law) OR structurally
   unconstrained (no law helps). Discriminate by measurement: bucket the
   relevant residual by distance-to-region on the current checkpoint. We
@@ -361,6 +374,24 @@ bucketed by the suspected cause.
   lowered by c: an instant a-posteriori bound V_policy >= v - sup(residual+)
   with no retraining. One-sided (asymmetric) grading trains toward the
   right sign; interval-bound verification of a 2-D net makes it a proof.
+  EXECUTED 2026-08-15 on two_arm and promoted (kb/two_arm.md section 10):
+  maximize the premium subject to v <= max H, LINEAR penalty so the
+  exact-penalty theorem applies, both terms in the same units or the
+  cheapest way to buy feasibility is inflating the learning number rather
+  than fixing the value. Overclaiming states 23.7% -> 0.6%, sup(residual+)
+  2.08e-2 -> 4.73e-4.
+- **The residual is not the referee, measured.** The subsolution net scores a
+  two-sided pde FOUR ORDERS worse than the net it replaced (8.2e-6 ->
+  1.55e-1) and the arena cannot tell them apart: 48,000 paired reps at
+  production parameters, -94.8 +/- 89.5, both ~21% better than Thompson. The
+  bullet above says policy error is second order; this is the number. Two
+  working consequences. A pde-based go/no-go on a policy change is not
+  evidence -- an early verdict here was "scrub it, the pde climbed four
+  orders", and the arena reversed it. And a value function can be a poor
+  solution of its own equation while being an excellent policy, so
+  "accuracy" has to be named: accuracy of the VALUE (certificates,
+  pricing, basis functions) and accuracy of the POLICY are different
+  currencies, and only the second one pays regret.
 - **Benchmark policies in a discrete-epoch regret arena against the true
   effect, with the environment's parameters, not the trainer's.** Pieces
   that mattered: PAIR the seeds (same effect draw and noise stream across

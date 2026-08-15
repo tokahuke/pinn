@@ -87,7 +87,7 @@ class Daemon:
 
         STATE.mkdir(parents=True, exist_ok=True)
         child = subprocess.Popen(
-            [sys.executable, "-m", "jobq", "backup", "--name", self.name],
+            [sys.executable, "-m", "jobq", "backup", "--pod", self.name],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL,

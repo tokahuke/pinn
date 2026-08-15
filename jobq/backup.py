@@ -15,7 +15,9 @@ BACKOFF: tuple[int, ...] = (5, 10, 20, 40, 60)
 
 
 @click.command()
-@click.option("--name", default="pinn", show_default=True, help="Pod to back up.")
+@click.option(
+    "--pod", "name", default="pinn", show_default=True, help="Pod to back up."
+)
 @click.option("--remote", default="/workspace", show_default=True)
 @click.option("--to", "local", default="data/pod", show_default=True)
 @click.option(

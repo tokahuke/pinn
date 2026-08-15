@@ -89,23 +89,23 @@ Organized one-module-per-problem; the separation should be kept:
   decades by a common log-scale (floor `1e-3` ≈ a 30-sd-wide prior — numerics
   only, no prior baked in; below that is 100x/decade stiffer territory nobody
   visits; same principle as three_arm's sampling), strictly `muhat > 0`. The
-  loss grades the HJB in similarity coordinates (kb/two_arm.md section 8:
-  leaves are `(z, s)`, autograd performs the chain rule, and a self-check
-  asserts the `tauhat**1.5` identity against the raw form), maximization kept
-  explicit and handed to `simplex.maximize_quadratic` (evaluate-and-max over
-  vertex + endpoints, gather selection), graded IN NATURAL UNITS — the chart's
-  `tauhat**1.5` is divided back out, so what is graded is the residual of
-  `v = max{...}` itself, the only error with a physical meaning and the one
-  the comparison principle bounds. NEVER put a scale on the residual, in any
-  shape or form, ever (learnings section 3 holds the rule and the measurement
-  behind it: the chart weight was an undeclared `tauhat**3`, ~15 decades,
-  spending 70% of the gradient on a corner already exact to ~1e-6 relative).
-  `POWER = 1.0` since 2026-08-10 — plain mean-of-squares; the p-mean at 2 was
-  compensating for the suppressed tail and became over-correction once the
-  units were fixed (learnings section 7). Plus the
-  BC1 ridge term and the learning-operator positivity term (`pos_learning`,
-  `relu(-L_ab).mean()` on the natural-units `L_ab`, since `L_ab` carries the
-  same `tauhat**1.5`; linear — same term and reasons as two_arm_drift).
+  loss is the SUBSOLUTION objective of kb/two_arm.md section 10 -- maximize
+  the premium subject to `v <= max H`, so a trained net is a certified lower
+  bound rather than a two-sided fit, and `u = 0` is rejected by the objective
+  instead of needing a degeneracy breaker. Read that section before touching
+  the weights: a squared violation, a gate-units climb and dual ascent on the
+  penalty were each tried and each failed in a documented way, and
+  `pos_learning` was deleted by proof rather than calibration. The
+  maximization is kept explicit and handed to `simplex.maximize_quadratic`
+  (evaluate-and-max over vertex + endpoints, gather selection), and everything
+  is graded IN NATURAL UNITS -- the chart's `tauhat**1.5` divided back out,
+  the only error with a physical meaning. NEVER put a scale on the residual,
+  in any shape or form, ever (learnings section 3 holds the rule and the
+  measurement behind it: the chart weight was an undeclared `tauhat**3`, ~15
+  decades, spending 70% of the gradient on a corner already exact to ~1e-6
+  relative); the CONSTRAINT is the one exception, since a positive per-point
+  rescale cannot move a feasible set, and both terms must share the scaling
+  or the floor decade is sacrificed (section 10).
   Do not substitute the interior FOC back
   in (that road leads to `sqrt` NaNs). `objective(batch)` packages sampling +
   loss for the trainer. New problems get their own sibling package.
@@ -251,9 +251,18 @@ not results:
 
     two_arm 5.704   two_arm_drift 98.9   three_arm 1.42e-3   three_arm_drift 3.02
 
-- two_arm: `two_arm.pt` — retrained 2026-08-09 through an escalating
-  pos_learning weight. Floor-decade `L_ab < 0` went 16.0% -> 6.8% and the
-  commit-on-no-evidence shelf is gone at every muhat.
+- two_arm: `two_arm.pt` -> `two_arm.16x16.pt`, a SUBSOLUTION net. The
+  two_arm_v2 experiment was PROMOTED 2026-08-15 and is gone: its objective is
+  now two_arm's own (kb/two_arm.md section 10) and the two-sided residual it
+  replaced exists only in that record. Against the net it replaced: overclaiming states 23.7% -> 0.60%,
+  sup(residual+) 2.08e-2 -> 4.27e-4, premium and BC1 intact -- and a two-sided
+  pde FOUR ORDERS worse (8.2e-6 -> 1.55e-1) that the arena cannot detect
+  (48,000 paired reps, -94.8 +/- 89.5 against the old champion, both ~21%
+  better than Thompson). Its predecessor is `two_arm.16x16.pt`, retrained
+  2026-08-09 through an escalating pos_learning weight, which took floor-decade
+  `L_ab < 0` from 16.0% to 6.8%. THE TWO ARE NOT COMPARABLE ON pde: one was
+  fitted two-sided, the other maximizes the premium subject to not
+  overclaiming. Judge replacements on the certificate numbers and the arena.
 - two_arm_drift: `two_arm_drift.pt` — the 10x-positivity net, bootstrapped
   `--from data/two_arm.pt` (the exact `etahat = 0` slice) with the raised
   weight on from step 0. It beat its predecessor on every training-side
@@ -272,7 +281,15 @@ not results:
   furthest from converged of the four (its starting pde is ~3 orders above
   three_arm's) and it was descending when stopped. Grafted from the
   pre-2026-08-07 three_arm champion, so its bit-exact-at-`etahat = 0`
-  ancestry can no longer be re-derived from a filename.
+  ancestry can no longer be re-derived from a filename. SUPERSEDED IN FLIGHT
+  2026-08-13: every 3ad net to date trained on a mis-sampled law — the
+  det-only floor admitted states with one pair coordinate 2-4 decades below
+  `PRIOR_FLOOR`, float32-ungradeable and carrying 98% of the pde loss, which
+  was the ~1e0 loss wall (kb/three_arm_drift.md section 6; the fence and
+  its measured before/after live in sample.py). Pair floor restored,
+  CONCAVITY_WEIGHT re-derived 1.2 -> 2.2e-1; a from-scratch 96:96:96 at
+  lr 1e-3 is on the pod (`/workspace/3ad_fenced.log`), past the old 30k
+  endpoint by iter 3k.
 
 The headline (2026-08-06): in the arena, at realistic parameters (values in
 project memory, not committed), the two_arm PINN policy beat

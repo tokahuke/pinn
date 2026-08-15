@@ -9,5 +9,6 @@ PROBLEMS = [
     "two_arm",
     "two_arm_drift",
     "three_arm",
+    "three_arm_v3",
     "three_arm_drift",
 ]

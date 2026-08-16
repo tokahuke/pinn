@@ -943,8 +943,99 @@ Those states were 1.0% of the cloud and carried 99.996% of the pde loss
 coordinates puts every marginal in support by construction, with no
 rejection step. Worth porting.
 
+## 18. The subsolution objective (THE three-arm objective since 2026-08-16)
+
+two_arm's objective of kb/two_arm.md section 10, carried to N = 3. Built as
+the `three_arm_v4` clone (v2 and v3 are burned names, so the counter kept
+going), measured, and PROMOTED; the clone is deleted and the two-sided
+residual it replaced survives only in this record.
+
+    loss = violation + TIE * (control + treatment) + CONCAVITY * concavity
+           - CLIMB * climb
+    violation = mean(relu(v - max H))     LINEAR
+    climb     = mean(u)                   no units factor
+    TIE 10, CONCAVITY 2.6, CLIMB 4.0e-2
+
+Three design points differ from the two-arm pair:
+
+- THE CLIMB NEEDS NO UNITS FACTOR. Both two-arm problems grade a similarity
+  chart and divide `tauhat**1.5` back out of the residual, which forces the
+  climb into the same units or the floor decade is sacrificed. This problem
+  is graded in value form, so residual and premium share units by
+  construction.
+- CONCAVITY STAYS, and it is NOT subsumed the way two_arm's pos_learning was.
+  That proof needs a violated learning number to force the max onto a VERTEX;
+  at N = 3 the max can sit on an EDGE and stay feasible while a direction is
+  non-concave. Measured on the champion of this date: 84% of live non-concave
+  states were feasible.
+- CLIMB from the dead-solution floor, not a sweep. The champion's
+  violation / climb is 4.1e-3, below which the commit envelope wins the LP
+  objective outright; 4.0e-2 is 10x clear. Deliberately not calibrated on a
+  short sweep -- see kb/two_arm_drift.md section 10 for what that costs.
+
+RESULT, trained off the two-sided champion (kept as
+`data/three_arm.64x64x64k8.two-sided.pt`), 8192-state medians over 5 draws:
+
+    net              violation   overclaim   sup(res+)   climb    non-concave
+    two-sided         1.92e-3      26.8%      3.52e-1    0.4667      0.02%
+    subsolution       2.59e-5       1.44%     2.28e-2    0.4681      0.02%
+
+74x on the mean violation and 15x on the SUP, which neither two-arm problem
+managed -- there the sup barely moved. THE PREMIUM IS UP 0.3%, and that is the
+number to read against section 17: v3's anchored gate climbed the premium 12%
+and destroyed the policy. This objective leaves the function where it is and
+fixes WHERE IT OVERCLAIMS.
+
+ARENA, 20,000 paired reps in two disjoint seed blocks (0-9,999 and
+500,000-509,999) at production parameters, frontier scenario:
+
+                        block 1          block 2           pooled
+    v4 - drop-one     -671 +/- 518   -1031 +/- 484     -863 +/- 354
+    v4 - champion     -545 +/- 520    -274 +/- 477     -398 +/- 352
+    v4 - Thompson    -4177 +/- 422   -4494 +/- 375    -4354 +/- 280
+
+THE FIRST TRAINED THREE-ARM NET TO BEAT THE DROP-ONE HEURISTIC, at 4.8 sigma
+and replicated in both blocks -- section 17 named that the real baseline and
+recorded the old champion FAILING it (+571, CI covering zero). Against the
+champion it is 2.2 sigma, favourable in both blocks: suggestive, not
+established, and promoted on the certificate with the arena as corroboration.
+
+LEARNING RATES: only the first descends. 1e-4 over 122k gave 45x and fell
+throughout; 3e-5 (17%), 1e-5 (19%) and 3e-6 (10%) each stepped down at the cut
+and then sat flat for their whole stretch. A cut that buys a step and no
+descent is shrinking the Adam wander radius around a fixed point, which is the
+topology's floor and not the schedule's.
+
+### The uniform-shift certificate LOSES to the free one (2026-08-16)
+
+Section 17's `B = max(0, p_ab, p_ac, m_b + p_bc)` is a PROVABLE subsolution --
+each drop is an admissible policy -- and costs no training. The trained net is
+one only after subtracting its worst overclaim (learnings section 9). Measured
+on 32,768 wedge states:
+
+    mean premium      trained 0.4706   drop-one B 0.4307
+    mean CERTIFIED    trained 0.4235   drop-one B 0.4307
+    trained >= B before the shift: 99.15%;  after: 60.2%
+
+So the trained bound is better everywhere until it is certified, and then it
+is worse: on states where B is alive the shifted net is a median 0.60x of B
+and worse on 88.9%. The whole difference is the tail. Priced at q99.9
+(shift 6.4e-3) instead of the sup, the trained bound wins by 7.8%, and the sup
+estimate is not even stable -- it moved 1.6e-2 -> 1.4e-1 as the draw count
+grew. The positive residual is exactly 0 at the 90th percentile, 1.9e-4 at
+q99, 6.4e-3 at q99.9.
+
+NOT a sampler artifact, which was the first suspicion given the un-ported
+fence below. The worst states have their smallest Schur marginal at 5.9e-3 --
+above `PRIOR_FLOOR`, merely 20x below the cloud median -- and the sub-floor
+states the fence would remove are 0.98% of the cloud carrying 0.02% of the
+positive residual. The fence would not move the certificate. That also
+re-prices the fence itself: it was measured against a SQUARED residual, where
+those states carried 99.996% of the loss; the linear violation term de-weights
+them by four orders on its own.
+
 ## To come
 
-- Nothing mathematical: the problem is fully derived. Remaining work is code
-  (the similarity-graded residual per section 14, mirroring two_arm's) and
-  then training.
+- Nothing mathematical: the problem is fully derived.
+- The sampler fence of section 17 is still un-ported, and now known to be
+  worth much less than its original measurement suggested (see above).

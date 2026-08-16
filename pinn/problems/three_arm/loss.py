@@ -1,6 +1,26 @@
 """
-Losses for the three-arm problem: the interior HJB residual, the two tie
-losses of doc section 12, and the trainer-facing objective.
+The three-arm objective: maximize the premium subject to not overclaiming,
+rather than driving a two-sided residual to zero. two_arm/loss.py holds the
+record (kb/two_arm.md section 10) and two_arm_drift is the same move on a
+second problem (kb/two_arm_drift.md section 10); read those first.
+
+V* is the MAXIMAL subsolution of the HJB, so `maximize u subject to
+v <= max H` has the true value function as its optimum and every feasible
+point is a certified lower bound. Three notes specific to N = 3:
+
+- The climb needs NO units factor. Both two-arm problems grade a similarity
+  chart and have to divide `tauhat**1.5` back out of the residual, which the
+  climb must then match or the floor decade is sacrificed. This problem is
+  graded in value form already, so the residual and the premium are in the
+  same units by construction and the climb is a plain mean.
+- CONCAVITY STAYS, and it is not subsumed the way two_arm's pos_learning was.
+  That argument needs a violated learning number to force the max onto a
+  vertex; at N = 3 the max can sit on an EDGE of the simplex and stay
+  feasible while a direction is non-concave. Measured on the 2026-08-16
+  champion: 84% of live non-concave states were feasible.
+- The tie losses keep their job. They break the never-explore degeneracy, and
+  now the climb term does too -- u = 0 is feasible, so only the climb rejects
+  it -- but the ties are what PLACE the solution, which the climb cannot see.
 """
 
 from __future__ import annotations
@@ -15,15 +35,26 @@ from ...train import Objective
 from .model import DimensionlessValueFunction
 from .sample import RidgeSample, Sample
 
-# The ties are the ONLY terms breaking the never-explore degeneracy: on that
-# solution pde is exactly 0 and the control tie exactly 1.0, so the weight must
-# beat the live pde. At pde 1.3e-2 the 100x floor is 1.3; 10.0 clears it.
+# The ties PLACE the solution: the climb term now kills the never-explore
+# degeneracy on its own (u = 0 climbs nothing), but nothing else in the
+# objective knows where the free boundary belongs. Carried over from the
+# two-sided loss, where it was set to beat a live pde of 1.3e-2; the anchor is
+# now a violation three orders smaller, so this is provisional and wants
+# re-deriving once the retrain settles.
 TIE_WEIGHT = 10.0
 
-# Plain mean-of-squares. P = 2 compensated for the chart weight's suppressed
-# tail; in natural units it over-corrects, dropping the effective sample size
-# at batch 4096 to 2.1 points on three_arm (54 at P = 1).
-POWER = 1.0
+# Climb and violation are in the SAME units here without any factor (see the
+# docstring), so this is the single knob and small is the exact-penalty side.
+# The floor is the dead solution: below violation / climb = 4.1e-3, measured on
+# the 2026-08-16 champion, the never-explore net scores better on the LP
+# objective alone. 10x above that floor.
+#
+# NOT calibrated on a short sweep. two_arm_drift found five decades
+# indistinguishable at 3k iterations and a monotone certificate collapse by
+# 50k at the cheapest of them (kb/two_arm_drift.md section 10). Judge this over
+# 100k+ on block medians: violation RISING with a flat climb means too high,
+# climb SAGGING below the champion's 0.466 means too low.
+CLIMB_WEIGHT = 4.0e-2
 
 # Concavity: L[f] >= 0 for every contrast direction, provable at the answer and
 # invisible to the residual, so it moves the path and not the fixed point. Zero
@@ -56,20 +87,24 @@ def directional_learning(
     return l_ab * along_b**2 + l_ac * along_c**2 + 2.0 * h * along_b * along_c
 
 
-def pde_loss(value: DimensionlessValueFunction, draw: Sample) -> tuple[Tensor, Tensor]:
+def subsolution_loss(
+    value: DimensionlessValueFunction, draw: Sample
+) -> tuple[Tensor, Tensor, Tensor]:
     """
-    Returns TWO numbers. The first is the interior HJB residual in value form
-    (doc sections 4, 7, 10), units rho = sigma = 1, i.e. the dimensionless
-    form (doc section 11):
-    v = max over the simplex of alpha.m + pairwise learning terms; graded in
-    the equation's OWN units, never scaled (see the standing rule below).
+    Returns THREE numbers: the violation, the climb and the concavity term.
 
-    KNOWN DEGENERATE on its own: the commit envelope v = max(0, m_b, m_c)
-    zeroes this residual exactly (the never-explore solution), just as the
-    two_arm residual was degenerate before BC1. The tie losses of doc
-    section 12 break the degeneracy.
+    The violation is the POSITIVE part of the residual of the interior HJB in
+    value form (doc sections 4, 7, 10), units rho = sigma = 1:
+    v = max over the simplex of alpha.m + pairwise learning terms, graded in
+    the equation's OWN units, never scaled. v > max H is the overclaim that
+    breaks the certificate; v < max H is merely a slack subsolution and is left
+    free, since the climb is what tightens it. LINEAR, because an L1 penalty is
+    EXACT at a finite weight where a quadratic only approaches feasibility.
 
-    The second is the concavity term: mean of relu(-L[f]) along ONE freshly
+    The climb is the plain mean premium -- no units factor, unlike either
+    two-arm problem (see the module docstring).
+
+    The third is the concavity term: mean of relu(-L[f]) along ONE freshly
     sampled contrast direction per point. Concavity of the simplex quadratic
     is L[f] >= 0 for EVERY direction f (derived 2026-08-08), provable at the
     answer by the mean-preserving-spread argument, and pairwise positivity
@@ -89,31 +124,25 @@ def pde_loss(value: DimensionlessValueFunction, draw: Sample) -> tuple[Tensor, T
         draw.m_b, draw.m_c, draw.tau_bb, draw.tau_bc, draw.tau_cc
     )
     theta = torch.rand_like(l_ab) * math.pi
-    violation = torch.relu(-directional_learning(l_ab, l_ac, l_bc, theta))
+    non_concave = torch.relu(-directional_learning(l_ab, l_ac, l_bc, theta))
     # SATURATED, as two_arm_drift's positivity term: relu is linear in depth,
     # so one deep point dominates -- the worst carried 7x the whole term's
     # mean. y / (s + y) is bounded per point, linear below s, 1/y^2 above; NOT
     # tanh (float32 gradient underflows, CLAUDE.md traps). Zero set untouched.
     # s sits just above the median violation, so lower it as the net converges.
-    concavity = (violation / (CONCAVITY_SCALE + violation)).mean()
+    concavity = (non_concave / (CONCAVITY_SCALE + non_concave)).mean()
 
     # NATURAL UNITS, NEVER SCALED. This once graded in similarity PREMIUM
     # units, det**0.75 / (tau_bb + tau_cc + tau_bc), to keep the never-explore
     # mode loud at low information. Gone: a chart-derived weight on the
     # residual is an undeclared reweighting of the domain (learnings section
-    # 3). The degeneracy it defended is the tie losses' job; if a dead
-    # Hamiltonian scores well again, strengthen the breaker, not the thumb.
-    #
-    # Power-mean attention (learnings section 7); at POWER = 1 this is plain
-    # mean-of-squares. Normalized by the detached batch mean so pow(P) sees
-    # O(1) numbers, not float32 dust.
-    graded = (v - best.value).pow(2)
-    scale = graded.mean().detach().clamp_min(1e-30)
+    # 3).
+    violation = torch.relu(v - best.value).mean()
+    climb = value.premium(
+        draw.m_b, draw.m_c, draw.tau_bb, draw.tau_bc, draw.tau_cc
+    ).mean()
 
-    return (
-        scale * (graded / scale).pow(POWER).mean().pow(1.0 / POWER),
-        concavity,
-    )
+    return violation, climb, concavity
 
 
 def control_tie_loss(value: DimensionlessValueFunction, draw: RidgeSample) -> Tensor:
@@ -195,22 +224,24 @@ def loss(
     treatment_draw: RidgeSample,
     iteration: int | None = None,
 ) -> Tensor:
-    pde_residual, concavity = pde_loss(value, draw)
+    violation, climb, concavity = subsolution_loss(value, draw)
     control_residual = control_tie_loss(value, control_draw)
     treatment_residual = treatment_tie_loss(value, treatment_draw)
 
     if iteration is not None:
         print(
-            f"iter {iteration}: pde {pde_residual.item():.3e}"
+            f"iter {iteration}: violation {violation.item():.3e}"
+            f"  climb {climb.item():.4e}"
             f"  control_tie {control_residual.item():.3e}"
             f"  treatment_tie {treatment_residual.item():.3e}"
             f"  concavity {concavity.item():.3e}"
         )
 
     return (
-        pde_residual
+        violation
         + TIE_WEIGHT * (control_residual + treatment_residual)
         + CONCAVITY_WEIGHT * concavity
+        - CLIMB_WEIGHT * climb
     )
 
 
@@ -264,16 +295,20 @@ if __name__ == "__main__":
             # the tie losses can differentiate it.
             return 0.0 * m_b
 
-    # The commit envelope solves the interior PDE exactly (the documented
-    # degeneracy), which doubles as an end-to-end test of the derivative ->
-    # L -> Hamiltonian pipeline: zero premium must give ~zero pde loss. The
-    # concavity term must be EXACTLY silent on it (all learning numbers are
-    # 0, relu(-0) contributes nothing): it cannot break or deepen the
-    # degeneracy, and there is no clamp residue to tolerate.
+    # THE POINT OF THIS OBJECTIVE: the commit envelope v = max(0, m_b, m_c) is
+    # FEASIBLE -- it solves the interior equation exactly, so it never
+    # overclaims -- but it climbs nothing, so the objective rejects it without
+    # help from the ties. Under the two-sided residual it was a perfect score.
+    # Doubles as the end-to-end test of the derivative -> L -> Hamiltonian
+    # pipeline. The concavity term must be EXACTLY silent on it (all learning
+    # numbers are 0), with no clamp residue to tolerate.
     zero = DimensionlessValueFunction(_ZeroPremium())
-    envelope_loss, envelope_concavity = pde_loss(zero, Sample.draw(2048))
+    envelope_violation, envelope_climb, envelope_concavity = subsolution_loss(
+        zero, Sample.draw(2048)
+    )
 
-    assert envelope_loss.item() < 1e-8, envelope_loss.item()
+    assert envelope_violation.item() < 1e-8, envelope_violation.item()
+    assert envelope_climb.item() == 0.0, envelope_climb.item()
     assert envelope_concavity.item() == 0.0, envelope_concavity.item()
 
     # The directional form: pair directions are its anchors, and it fires
@@ -394,12 +429,13 @@ if __name__ == "__main__":
     def clone(state: Sample) -> Sample:
         return Sample(*(field.detach().clone() for field in vars(state).values()))
 
-    # The graded residual only: the concavity term draws a fresh direction
-    # per call, so per-draw values differ across relabels (only its zero set
-    # is chart-invariant).
-    original_loss, _ = pde_loss(invariant, clone(batch))
-    swapped_loss, _ = pde_loss(invariant, clone(swapped))
-    relabeled_loss, _ = pde_loss(invariant, clone(relabeled))
+    # The violation only: the concavity term draws a fresh direction per call,
+    # so per-draw values differ across relabels (only its zero set is
+    # chart-invariant), and the climb is a premium mean that the relabel maps
+    # onto itself trivially.
+    original_loss, _, _ = subsolution_loss(invariant, clone(batch))
+    swapped_loss, _, _ = subsolution_loss(invariant, clone(swapped))
+    relabeled_loss, _, _ = subsolution_loss(invariant, clone(relabeled))
 
     # RELATIVE tolerance: the natural-units loss is no longer a fixed-size
     # number, so an atol calibrated at one magnitude means nothing at another
@@ -413,4 +449,21 @@ if __name__ == "__main__":
         relabeled_loss.item(),
         original_loss.item(),
     )
+
+    from pathlib import Path
+
+    champion = Path("data/three_arm.pt")
+
+    if champion.exists():
+        trained = DimensionlessValueFunction.load(champion)
+        fit = subsolution_loss(trained, Sample.draw(8192).fold())
+
+        # The LP objective ALONE -- no ties, which are the degeneracy breaker
+        # the two-sided residual needs -- prefers the champion to the commit
+        # envelope. This is what CLIMB_WEIGHT has to clear, and the margin is
+        # only 10x: the champion's violation / climb is 4.1e-3.
+        assert (
+            fit[0] - CLIMB_WEIGHT * fit[1]
+            < envelope_violation - CLIMB_WEIGHT * envelope_climb
+        ), "the climb term must reject the commit envelope without the ties"
     print("ok")

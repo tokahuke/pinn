@@ -3,11 +3,12 @@ Three-armed Bayesian allocation (ABC tests). Maths in kb/three_arm.md.
 
 Layout: sample.py (state space, wall families, the wedge fold), simplex.py
 (plain calculus: quadratic max over a triangle), model.py (premium net and
-value wrapper), loss.py (HJB residual, tie losses pending, objective).
+value wrapper), loss.py (the subsolution objective and both tie losses of doc
+section 12).
 
-Complete and training-ready: samplers, fold, models with the proven
-free-information envelope (doc section 13), simplex max, and the full loss
-(interior HJB residual + both tie losses of doc section 12).
+The objective maximizes the premium subject to `v <= max H` since 2026-08-16
+(kb/three_arm.md section 18), so a trained net is a certified lower bound
+rather than a two-sided fit.
 """
 
 from .loss import (
@@ -15,7 +16,7 @@ from .loss import (
     draw,
     loss,
     objective,
-    pde_loss,
+    subsolution_loss,
     treatment_tie_loss,
 )
 from .model import (

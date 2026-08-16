@@ -162,8 +162,16 @@ Organized one-module-per-problem; the separation should be kept:
   primitives for the free-boundary junction, zero-init head so stitching
   onto a trained checkpoint is bit-exact at step 0, alive-start bias +0.5.
   `Sample.fold_ordered()` returns the applied relabel for policy readout
-  (the old discarded-permutation TODO is resolved). Grading: natural units
-  like the two-arm pair — the similarity PREMIUM weight
+  (the old discarded-permutation TODO is resolved). Grading: the SUBSOLUTION
+  objective since 2026-08-16 (kb/three_arm.md section 18) — maximize the
+  premium subject to `v <= max H`, in natural units like the two-arm pair.
+  Two differences from those: the climb needs NO units factor (this problem
+  is graded in value form, not on a similarity chart, so residual and premium
+  already share units), and the CONCAVITY term stays — two_arm's deletion
+  proof needs a violated learning number to force the max onto a VERTEX, and
+  at N = 3 it can sit on an EDGE and stay feasible while a direction is
+  non-concave (84% of live non-concave states were feasible when measured).
+  The similarity PREMIUM weight
   `det**0.75 / (tau_bb + tau_cc + tau_bc)` was DELETED 2026-08-10 as the same
   bug in another dress; the never-explore mode it was defending against is
   the tie losses' job, and they are the terms that provably break it. Self-
@@ -289,12 +297,23 @@ two-sided residual. The line above is a baseline for the three-arm pair only.
   CONVERGED FOR THIS TOPOLOGY: three learning rates, 1e-4 (19x), 3e-5 (38%),
   1e-5 (2%) -- the last cut bought nothing, so the floor is 24x24's, not the
   schedule's, and the next lever is width or a kink graft. No kink branch.
-- three_arm: `three_arm.pt` — 3 hidden layers with 8 stitched saturated kink
-  units, trained through the concavity term overnight 2026-08-10. The kink
-  stitch was the decisive move (tail -19%, worst point -25% in one 30k run,
-  junction specialist unit self-oriented onto `z_bc`). A from-scratch
-  16-kink co-training run gave communal branch anatomy and no junction
-  specialist -- sequencing is load-bearing, see learnings section 8.
+- three_arm: `three_arm.pt` -> `three_arm.64x64x64k8.pt`, a SUBSOLUTION net
+  since 2026-08-16, trained off the two-sided champion it replaced (kept as
+  `three_arm.64x64x64k8.two-sided.pt`; the two are NOT comparable on pde).
+  Mean violation 1.92e-3 -> 2.59e-5, overclaiming states 26.8% -> 1.44%,
+  sup(residual+) 3.52e-1 -> 2.28e-2, and the premium UP 0.3% -- it fixes where
+  it overclaims rather than inflating the value, which is exactly what
+  three_arm_v3 failed to do. AND IT BEATS THE DROP-ONE BASELINE, the first
+  trained three-arm net to manage it: 20,000 paired reps in two disjoint seed
+  blocks, -863 +/- 354 against drop-one, -398 +/- 352 against the old
+  champion, -4354 +/- 280 against Thompson. The champion margin is 2.2 sigma
+  -- suggestive, not established; it was promoted on the certificate with the
+  arena as corroboration. Its architecture is unchanged and still the decisive
+  move of 2026-08-10: 3 hidden layers with 8 stitched saturated kink units
+  (tail -19%, worst point -25% in one 30k run, junction specialist unit
+  self-oriented onto `z_bc`). A from-scratch 16-kink co-training run gave
+  communal branch anatomy and no junction specialist -- sequencing is
+  load-bearing, see learnings section 8.
 - three_arm_drift: `three_arm_drift.pt` — concavity-trained 2026-08-10. Still the
   furthest from converged of the four (its starting pde is ~3 orders above
   three_arm's) and it was descending when stopped. Grafted from the
@@ -388,17 +407,22 @@ Open frontiers:
   is fixing the second problem first.
 - THE DROP-ONE HEURISTIC IS THE BASELINE, not Thompson (kb/three_arm.md
   section 17). `u = max(p_ab, p_ac)` -- two frozen two_arm evaluations and a
-  max, no three-arm training -- beats Thompson by 16% and matches the
-  three_arm champion (9,000 paired reps: -3410 [-3796, -3023] against TS,
-  +571 [-28, +1171] against the champion). Any new three-arm work is
-  measured against IT. three_arm_v3, which tried to learn a correction on
-  top of that base, was scrubbed 2026-08-16 having added +412 [-44, +867].
-- The b/c-junction blob (three_arm) at ~±0.07 relative, best ever, still
-  the dominant error; systematically POSITIVE (v > max H), which also
-  inflates the net's value claims ~9% above its policy's simulated value.
-  The subsolution program (one-sided grading + the constant-shift
-  a-posteriori bound; see learnings section 9) would turn this into a
-  certificate.
+  max, no three-arm training -- beats Thompson by 16%, and it MATCHED the
+  three_arm champion until 2026-08-16 (9,000 paired reps: -3410 against TS,
+  +571 [-28, +1171] against that champion). Any new three-arm work is measured
+  against IT. three_arm_v3, which tried to learn a correction on top of that
+  base, was scrubbed 2026-08-16 having added +412 [-44, +867]. The
+  SUBSOLUTION net of that same date is the first to clear it, -863 +/- 354
+  over 20,000 paired reps in two blocks (section 18) -- the bar is now beaten,
+  not merely matched, and it stays the bar.
+- The b/c-junction blob (three_arm): the one-sided half of the subsolution
+  program SHIPPED 2026-08-16 and took overclaiming from 26.8% to 1.44%. The
+  constant-shift half is measured and NOT adopted: the uniform shift is
+  priced by the worst point in the domain, and at that price the certified
+  net (mean premium 0.4235) loses to the drop-one bound (0.4307), which is
+  provable for free. At q99.9 it wins by 7.8%, and the sup estimate is not
+  stable across draw counts. Section 18 has the numbers; the state-dependent
+  shift that would fix it is parked in learnings section 9 (`L[phi] = 0`).
 - The curvature law constant and the tauhat-tail anchoring flags of
   kb/two_arm.md remain open.
 

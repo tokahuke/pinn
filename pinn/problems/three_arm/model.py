@@ -280,12 +280,12 @@ class DimensionlessValueFunction(nn.Module):
         H(b, c) = b (m_b + l_ab) + c (m_c + l_ac) - l_ab b^2 - l_ac c^2
         + (l_bc - l_ab - l_ac) b c, handed to plain calculus in
         triangle-quadratic coefficients. Everything is graph-connected to the
-        premium's parameters, so pde_loss grades v - best.value and policy
+        premium's parameters, so subsolution_loss grades v - best.value and policy
         reads the argmax off the same derivation.
 
         Returns the learning numbers (l_ab, l_ac, l_bc) as well: they carry
         the Hamiltonian's Hessian, and the loss grades its concavity along
-        sampled contrast directions (pde_loss).
+        sampled contrast directions (subsolution_loss).
         """
         m_b = m_b.detach().requires_grad_(True)
         m_c = m_c.detach().requires_grad_(True)

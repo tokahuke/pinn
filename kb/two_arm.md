@@ -377,10 +377,16 @@ exist was never two_arm itself: three_arm_v3's
 base overclaims on 27% of wedge states because it is a trained net rather than
 the true u2, and that deadlocked a v3 run (kb/three_arm.md section 17).
 
-    loss = PENALTY * (violation + RIDGE * ridge) - CLIMB * climb
+    loss = violation + RIDGE * ridge - CLIMB * climb
     violation = mean(relu(v - max H) / tauhat**1.5)      LINEAR
     climb     = mean(u / tauhat**1.5)                    natural units
-    PENALTY 1e3, RIDGE 2e4, CLIMB 1e2
+    RIDGE 2e4, CLIMB 1e-7
+
+There is NO overall penalty weight. Both terms are measured the same way, so
+only the RATIO is a knob and the outer factor cancels; it existed as
+PENALTY 1e9 while it was being swept and was folded out once the sweep showed
+the answer does not depend on it. Read any historical PENALTY/CLIMB pair as the
+ratio -- 1e2 against 1e9 is this 1e-7 exactly.
 
 Four design points, each measured rather than argued:
 
@@ -388,8 +394,11 @@ Four design points, each measured rather than argued:
   threshold (the largest Lagrange multiplier) the penalized optimum IS the
   constrained optimum -- while a quadratic only approaches feasibility as the
   weight grows. It is also what the house does for every other sign condition.
-  PENALTY 1e2 and 1e3 give indistinguishable curves, which is the signature of
-  being above the threshold: past it the weight stops mattering.
+  A tenfold change in the climb-to-violation ratio gives indistinguishable
+  curves, which reads as being above the threshold: past it the weight stops
+  mattering. TRUST THAT ONLY OVER A LONG RUN. The same probe on two_arm_drift
+  showed five decades indistinguishable at 3k iterations and a monotone
+  certificate collapse by 50k (kb/two_arm_drift.md section 10).
 - The climb is in the VIOLATION'S UNITS. A uniform climb (mean of the gate
   u / nu) lost the floor decade: the violation carries tauhat**-1.5, 3.2e4 at
   the floor, so the penalty outbid a flat climb by four orders there. The net
@@ -439,5 +448,6 @@ not a frozen total, but `climb` AND `violation` printing exactly 0 while
 `ridge` stays SATISFIED at ~1e-11. The premium survives in a sliver at
 muhat = 0, enough to hold BC1's slope, and is dead everywhere the cloud
 samples. Nothing was lost: a dead net cannot beat a live one on this objective
-(the -CLIMB * climb term makes a live total ~ -2.4e5 against ~ +2e-4 dead), so
+(the -CLIMB * climb term makes a live total ~ -2.5e-4, the champion's climb of
+2476 times 1e-7, against a dead one of ~ +2e-7 -- ridge only), so
 best-EMA checkpointing is structurally safe here.

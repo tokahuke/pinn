@@ -392,6 +392,39 @@ bucketed by the suspected cause.
   "accuracy" has to be named: accuracy of the VALUE (certificates,
   pricing, basis functions) and accuracy of the POLICY are different
   currencies, and only the second one pays regret.
+- **A near-subsolution becomes an EXACT one by subtracting a constant.**
+  Write the HJB as `N[v] = v + drift - max_alpha H(alpha, L[v])`. The learning
+  operator `L` is built from derivatives only, the max reads `L` and the state,
+  and the discount term carries `v` with coefficient exactly 1 -- so
+  `N[v - c] = N[v] - c`, everywhere, exactly. Take `c = sup relu(N[v])` and
+  `v - c` is a certified lower bound on `V*`. Verified on two_arm_drift at
+  c = 1e-3, 1e-2, 1e-1: the residual drops by c to within 2.4e-4, an error
+  CONSTANT IN c, i.e. float32 noise in evaluating the residual rather than a
+  missing term. THE PRICE IS SET BY THE SUP, NOT THE MEAN, and the two are not
+  close: on that net the mean violation fell 22x during training while the sup
+  barely moved, because the loss grades the mean. Sup 1.0-2.4e-2 across draws,
+  25x the 99th percentile, its argmax always at the domain's trivial corner
+  (muhat 39-61, tauhat at the floor, etahat at the top of the law). Cost of the
+  shift against the value: 0.35% median, 5.7% at q90, and MORE THAN THE WHOLE
+  VALUE at the worst states -- 4.2% of states have `v < 0.1` (near-tie, high
+  precision) and a uniform absolute shift eats them. Grade a high quantile if
+  the certificate is the deliverable.
+  PARKED GENERALIZATION (2026-08-16, untested): `L` is the heat operator up to
+  a positive factor -- substituting `sigma = -1/tauhat`,
+  `L = (1/tauhat^2)[d_sigma + (1/2) d_mumu]`, so "heat time" is minus the
+  posterior variance, running from -inf at ignorance to 0 at perfect
+  information. Its kernel is therefore the martingales of the belief flow,
+  which are exactly the posterior expectations `phi = E[g(theta) | muhat,
+  tauhat]` of fixed functions of the truth -- values information cannot move.
+  The heat polynomials give `phi = 1` (the uniform shift), `muhat`,
+  `muhat^2 + 1/tauhat`, and `exp(lambda muhat + lambda^2/(2 tauhat))`. Any such
+  `phi` shifts by `N[v - c phi] = N[v] - c(phi + drift[phi])`, so a `phi` that
+  is LARGE where the residual peaks and SMALL where the value is small fixes
+  the uniform shift's one weakness. Under drift the `muhat^2` candidate has
+  `phi + etahat^2 tauhat^2 phi_tau = muhat^2 + 1/tauhat - etahat^2`, which goes
+  negative exactly at the states that set the price; the exponential one keeps
+  a positive denominator whenever `lambda < sqrt(2)/etahat`, and `etahat` is a
+  PARAMETER that `L` never differentiates, so `lambda` may depend on it.
 - **Benchmark policies in a discrete-epoch regret arena against the true
   effect, with the environment's parameters, not the trainer's.** Pieces
   that mattered: PAIR the seeds (same effect draw and noise stream across

@@ -373,13 +373,23 @@ DONE (`scratchpad/verify_drift.py`, 2026-08-07, float64):
 4. VERIFIED. `u = 0` gives residual exactly 0.0 at every `etahat` tested —
    the degeneracy is intact, so BC1 stays load-bearing, and the derivative
    chain is end-to-end correct.
-6. VERIFIED as module self-checks, all four passing
+6. VERIFIED as module self-checks
    (`poetry run python -m pinn.problems.two_arm_drift.<envelope|sample|model|loss>`):
    the bitwise `etahat = 0` envelope anchor in both dtypes; the two_arm
    champion loading with a bitwise-identical response and an absolute premium
    gap of 1.9e-6 on values up to 9.3; the item-2 transcription identity
    carried into `loss.py` as a permanent self-check; and the full float32 training path -- two
    `create_graph` derivatives plus backward through the second.
+
+   BROKEN 2026-08-16, in `model.py` not in the maths: the whole-premium
+   bitwise check fails on 228 of 1000 points by up to 9.5e-7. two_arm's
+   `forward` was re-associated to `nu * (scale * gate)` while this one still
+   computes `(scale * envelope) * gate`, and float multiplication does not
+   associate. The envelope is still bitwise (0 of 1000 differ against `nu`) and
+   the response net is still bitwise; only the final product order differs.
+   FIXED 2026-08-16 by matching two_arm's grouping. LESSON: a bitwise
+   invariant spanning two modules breaks from an edit to EITHER, and this one
+   broke silently in a commit that never touched this package.
 
 OPEN:
 
@@ -389,3 +399,73 @@ OPEN:
 7. The float32 branch of the `nu` limit (section 7): the underestimate
    direction, which would break the upper-bound property, is reported but not
    independently reproduced.
+
+## 10. The subsolution objective (THE drift objective since 2026-08-16)
+
+two_arm's objective of kb/two_arm.md section 10, carried onto the drift
+equation. Built as a clone, measured, and PROMOTED into
+`pinn/problems/two_arm_drift/` on 2026-08-16; the clone is deleted and the
+two-sided residual it replaced survives only in this record.
+
+    loss = violation + RIDGE * ridge + POSITIVITY * pos_learning - CLIMB * climb
+    RIDGE 2e4, POSITIVITY 2e-2, CLIMB 1e-7
+
+The certificate argument is unchanged: the drift term is part of the generator,
+not an extra source, so a feasible `v` is still a lower bound on `V*`.
+
+- pos_learning STAYS, where two_arm deleted it by proof. That proof needs the
+  left side to be `e^s (z + g)` alone: `L_ab < 0` makes the Hamiltonian convex,
+  the max lands on a vertex, and the violation is then exactly `u`. Here the
+  left side also carries `etahat^2 e^(2s) tauhat_slope`, which can be negative
+  and pay for a negative learning operator, so feasibility no longer subsumes
+  the sign condition. Kept in the SATURATED form of the two-sided loss, with
+  the weight re-derived against the new anchor (the champion satisfies
+  `L_ab >= 0` outright, so it was calibrated 3k iterations in, where the term
+  reads 1.2e-3 against a violation of 2.2e-4).
+- CLIMB is two_arm's 1e-7, and the SHORT-HORIZON SWEEP THAT SAID OTHERWISE IS A
+  TRAP. 3k iterations from the champion at 1e-7, 1e-6, 1e-5, 1e-4 and 1e-3 all
+  land on violation 2.1-2.5e-4 with the climb within 1% of its start, which
+  reads as five decades of exact-penalty plateau and is why 1e-5 was picked
+  first. It is a horizon artifact: the trade needs ~50k iterations to open. Run
+  at 1e-5 for 136k, block medians over the trace, every column monotone:
+
+        iters          violation      climb      ridge        pos
+        0-16900        8.605e-04  1.728e+04  4.518e-08  3.659e-03
+        34000-50900    9.536e-04  1.734e+04  2.554e-08  4.146e-03
+        68000-84900    1.149e-03  1.739e+04  1.865e-08  6.563e-03
+        119000-135900  1.338e-03  1.743e+04  1.458e-08  9.028e-03
+
+  0.9% of climb bought with 56% more violation depth and 2.5x the sign
+  violations. The objective falls the whole way (1.5e-3 gained, 5.9e-4 paid) --
+  the optimizer is right and the price is wrong. Dividing through reads the
+  objective as "maximize the climb under penalty `1 / CLIMB`", so SMALL is the
+  exact side, and monotone trends over ~100k are the only test that sees it.
+  LESSON, general: a weight sweep must run past the horizon on which the terms
+  it trades between can actually move. Auxiliary weights calibrated on one
+  batch are already banned here for the same reason one decade up.
+- The floor is the dead solution and it is close: below
+  `violation / climb = 7.0e-8` the never-explore net scores better than the
+  champion on the LP objective alone. The module self-check asserts against it.
+
+RESULT, trained off the two-sided champion (kept as
+`data/two_arm_drift.24x24.two-sided.pt`), 8192-state medians over 5 draws:
+
+    net              violation   overclaim   climb      L_ab < 0
+    two-sided         1.20e-3      26.1%     1.72e4      0.00%
+    subsolution       3.03e-5       2.04%    1.69e4      0.01%
+
+The whole price is ~2% of climb, all of it paid before iteration 20k while
+feasibility was being reached; after that the climb sits flat and only the
+violation moves. ARENA, 10,000 paired reps at production parameters, both drift
+worlds: `-119 +/- 321` in the deployment world and `-69 +/- 423` in the harsh
+one -- indistinguishable from zero, faintly favourable in both, and ~3,000 and
+~4,300 ahead of Thompson. Same shape as two_arm's promotion: the arena cannot
+see the difference and the certificate is the entire gain.
+
+CONVERGED FOR 24x24, by the returns per learning rate -- 1e-4 over 122k gave
+19x, 3e-5 over 330k gave 38%, 1e-5 over 116k gave 2%. A cut that buys nothing
+means the floor belongs to the topology, not the schedule; the next lever is
+width or a kink graft onto this trunk, never co-training. The rates were cut on
+a mechanical criterion (violation improving under 4% across 60k iterations,
+block medians) rather than by eye, which is what made the last cut's verdict
+legible instead of arguable.

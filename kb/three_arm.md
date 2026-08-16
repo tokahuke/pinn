@@ -863,59 +863,87 @@ Priced by the sweep: pairs-only 8.922e-6 fenced against 8.924e-6 for all
 four candidates. The Boltzmann temperature sweep that same day refuted
 smoothing entirely (issue 2).
 
-### Implementation (2026-08-14): pinn/problems/three_arm_v3
+### Verdict: SCRUBBED 2026-08-16, and what it taught
 
-A CLONE of three_arm (promote or scrub, the v2 contract): sample, simplex
-and loss verbatim, model.py replaced by u = B + exp(log_scale)(nu2 - B) r.
-The base is frozen and EMBEDDED (premium.base.*), so checkpoints are
-self-contained against the aging champion symlink; read_topology reads the
-correction at premium. and the base at premium.base. Bootstrap:
-`pinn init --problem three_arm_v3 --topology 64:64:64 --from
-data/two_arm.pt`; --from a v3 checkpoint resumes, or kink-grafts when
---topology is also given.
+`pinn/problems/three_arm_v3` was built, measured and deleted. The code is
+gone; this is the record. Read it before proposing a base-plus-correction
+architecture again.
 
-THE FENCE, and what it actually was (2026-08-15). v3's sampler now floors
-all THREE PAIR COORDINATES; three_arm floors the two diagonal entries, which
-leaves the b-c coordinate bare, and the fold then permutes that bare
-coordinate into any slot -- so every Schur marginal reached ~0.5x the floor
-and the two_arm base was called outside its support. Those states were 1.0%
-of the cloud and carried 99.996% of the pde loss (mean residual squared
-1.2e3 against 4.7e-4 fenced); they are the "bobbing" the printed loss showed
-all along, and they are NOT a base-extrapolation artifact -- the two_arm
-clamp (kb/two_arm.md section 9) made them honest in value and WORSE to
-grade, 6.6e-4 -> 1.4e+1, because a tau-frozen shape has chart residual O(1)
-against nu's O(e^s). Flooring the pair coordinates puts every marginal in
-support by construction, no rejection step, and the sampler self-check now
-asserts it before AND after the fold. Result: pde 1.21e-5 with a +/-3%
-spread across draws, where it had been a four-order lottery.
+**THE HEADLINE IS THE BASE, NOT THE CORRECTION.** The drop-one heuristic
+ALONE -- `u = max(p_ab, p_ac)`, two frozen two_arm evaluations and a max,
+with NO three-arm training of any kind -- beats Thompson sampling by 16% and
+is at parity with the trained three_arm champion. Pooled over 9,000 paired
+reps in two disjoint seed blocks at production parameters (frontier
+scenario):
 
-Init lesson, measured: the response head must be ZERO-WEIGHT with bias 0.1,
-not Xavier-with-small-bias. The residual reads derivatives, and a random
-head at 1% VALUE contamination still carries O(1) response derivatives —
-pde 1.4e+1, against 6.6e-4 for the constant-response start. Consequence:
-at step 0 only the head and log_scale receive gradient (the zero weight
-blocks the chain into the hidden stack for one step — the kink_out warmup,
-one level up).
+    drop-one - Thompson      -3410   [-3796, -3023]
+    drop-one - champion       +571   [  -28, +1171]   covers zero
+    champion - Thompson      -3981   [-4454, -3508]
 
-A TEMPERATURE knob (nu2-normalized Boltzmann, T = 0 bitwise the hard max)
-was added and removed the same day. The issue-2 refutation re-ran in
-temperature form at init: T = 1e-4 doubles the fenced median while adding
-a 4e-2-class spike source; T = 1e-3 reads 3.9e+0, T = 1e-2 2.7e+4. A short
-LIVE run at T = 1e-3 showed training eating the band fast (3e+2 -> 1.65 in
-200 iters) -- at T > 0 the defect is smooth, hence representable by the
-correction, which the T = 0 crease is not — so the trained equilibrium was
-never measured and this stays reopenable; the knob itself is deleted, not
-just defaulted off. A checkpoint trained at some T carries no record of it,
-which was the sharpest operational hazard.
+That is the result worth keeping from the whole exercise. Rebuilding it is
+three lines: evaluate the two_arm champion at each pair's marginal state
+(section 16's formulas), take the max, wrap it as a premium. It is the
+honest BASELINE for any future three-arm work -- Thompson is the wrong bar.
 
-Init medians (64:64:64 on the champion base, 7 draws x 4096): pde 6.6e-4,
-control tie 2.1e-2 (the base nearly carries BC1 on its own; dead value
-would be 1.0), treatment tie ~1e-19 — the swap-symmetric max satisfies
-wall 2 IDENTICALLY, as derived — concavity raw 1.8e-6 with violations at
-float-noise depth (median 1e-10; the base is concave). Weights re-derived
-under the band rule alone, v3 having no dead-solution floor: TIE_WEIGHT
-2e-3, CONCAVITY_WEIGHT 1e1, CONCAVITY_SCALE kept at 1e-3 (above the noise
-so it stays linear).
+**The correction added nothing, in any variant.** `trained v3 - drop-one`
+was +412 [-44, +867] after 35k steps. Three gates were tried:
+
+- ONE-SIDED (`u = B + (nu2 - B) G+`). Deadlocked at iteration 10,200: the
+  base overclaims on 27% of wedge states (it is a trained net, so `B <= u`
+  is not a theorem), the correction needed to go negative there, could not,
+  and `relu(r)**2` zeroed the correction AND its gradient.
+- TWO-SIDED (`relu(r)**2` on each sign, B outside the gate). Inert for a
+  measured reason: both branches have zero value AND ZERO SLOPE at r = 0, so
+  `u = B` is a STATIONARY POINT (du/dr = 2.0e-3 at r = -1e-3, 0 at r = 0). A
+  35k run parked against it -- 81.3% of live states at u ~= B, 18.5% below,
+  0.2% above -- while the truth sits ~15% ABOVE B (the champion's premium
+  exceeds it on 99.7% of live states, median 1.155x). The C1 smoothness at
+  u = B was the design's proudest property and is what made it inert.
+- ANCHORED (B inverted into the gate argument: `anchor = sqrt(t/(1-t))`,
+  `t = B/nu2`, `u = exp(ls) nu2 G(anchor + r)`). Fixed the mechanism -- the
+  net finally climbed, u/B 1.005 -> 1.122 in ~20 minutes, u > B on 94.9%,
+  non-concavity 23.6% -> 4.0% -- and the POLICY GOT WORSE: 29,230 against
+  Thompson's 22,543 over 3,000 paired reps, +6,687 +/- 2,250. Every
+  subsolution diagnostic improved while the only thing that matters
+  degraded.
+
+**Convexity is the property, `L[f] >= 0` is a proxy, and the net gamed it.**
+`B = max(p_ab, p_ac)` is a max of convex functions, so a fresh v3 is 100%
+convex in the belief mean (worst eigenvalue -5e-10). The 35k run took that
+to 27% of live states (worst curvature -0.99) while IMPROVING the sampled
+directional test 80.3% -> 93.3%. `L` mixes the mean-Hessian with the
+precision-drift term, so a net can buy `L >= 0` by inflating `dv/dtau` while
+the mean-Hessian goes negative. Convexity is checkable directly and cheaply
+(2x2 Hessian: `v_bb >= 0`, `det >= 0`), needs no random direction, and has
+none of the 4.7x draw noise that made the concavity weight uncalibratable.
+If a curvature condition is graded again, grade THAT one.
+
+**Traps banked, all measured here:**
+
+- A dead relu-squared correction prints a HEALTHY loss. Under the two-sided
+  residual: pde 8.6e-6, control tie 2e-2, and treatment tie AND concavity
+  EXACTLY 0.000e+00. Under the subsolution objective: `climb` and
+  `violation` both exactly 0 with the ridge still satisfied at ~1e-11 (a
+  sliver alive at m_b = 0 holds BC1 while everything the cloud samples is
+  dead).
+- Checkpoints do not survive a gate change. Loading two-sided weights into
+  the anchored gate reinterprets the response entirely and produced
+  `u/B = 0.123` and an arena regret of 123,639 -- both artifacts, not
+  measurements.
+- `sqrt` in the anchor has an infinite derivative at 0 and `B = 0` on 55% of
+  the wedge, so the hamiltonian's chain nans from step 0 without a
+  `clamp_min` whose backward is zero where it binds.
+
+**What outlived it.** The SAMPLER FENCE is a real bug fix and three_arm
+still lacks it: three_arm floors the two diagonal precision entries, which
+leaves the b-c pair coordinate bare, and the fold then permutes that bare
+coordinate into any slot -- so every Schur marginal reaches ~0.5x the floor.
+Those states were 1.0% of the cloud and carried 99.996% of the pde loss
+(mean residual squared 1.2e3 against 4.7e-4 fenced). Flooring all three PAIR
+coordinates puts every marginal in support by construction, with no
+rejection step. Worth porting.
+
+## To come
 
 - Nothing mathematical: the problem is fully derived. Remaining work is code
   (the similarity-graded residual per section 14, mirroring two_arm's) and

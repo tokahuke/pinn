@@ -185,10 +185,15 @@ class ExplorationPremium(DeclaresTopology):
         if self.kinks > 0:
             bumps = torch.relu(self.kink_in(features)) ** 2
             response = response + self.kink_out(bumps / (1.0 + bumps)).squeeze(-1)
-        bound = self.log_scale.exp() * envelope(muhat, tauhat, etahat)
         y = torch.relu(response) ** 2
+        gated = self.log_scale.exp() * y / (1.0 + y)
 
-        return bound * y / (1.0 + y)
+        # Associated as two_arm does it, envelope LAST. The old grouping
+        # (log_scale * envelope) * gate is the same function to 1e-7 and broke
+        # the bitwise etahat = 0 bootstrap the moment two_arm's forward was
+        # rewritten -- float multiplication does not associate, and the
+        # self-check below is the one that catches it.
+        return envelope(muhat, tauhat, etahat) * gated
 
 
 class DimensionlessValueFunction(nn.Module):
@@ -239,8 +244,8 @@ class DimensionlessValueFunction(nn.Module):
         (carrying e^(2s)) like the source, so the O(1) conditioning of the
         similarity chart survives: no derivative term is multiplied by a large
         number. Returns the left side and the maximization, both
-        graph-connected to the premium's parameters, so pde_loss grades their
-        gap and policy reads the argmax off the same derivation.
+        graph-connected to the premium's parameters, so subsolution_loss grades
+        their gap and policy reads the argmax off the same derivation.
         muhat >= 0 only, like forward.
 
         Returns L_ab as well. It is the learning operator -- the value of being

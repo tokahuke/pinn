@@ -131,7 +131,16 @@ Organized one-module-per-problem; the separation should be kept:
   perfect-information premium in closed form (`envelope.py`), which collapses
   BITWISE onto two_arm's `nu` at `etahat = 0` — which is what makes
   `pinn init --problem two_arm_drift --from data/two_arm.pt` an exact
-  bootstrap.
+  bootstrap. That bitwise anchor is a self-check and it is LOAD-BEARING: it
+  broke once from a re-association of two_arm's `forward` alone, in a commit
+  that never touched this package, and float multiplication does not
+  associate. Keep the final product grouped as two_arm groups it.
+  The objective is the SUBSOLUTION objective since 2026-08-16
+  (kb/two_arm_drift.md section 10), two_arm's with one difference:
+  `pos_learning` STAYS in the loss. two_arm deleted it by proof, and that
+  proof needs the left side to be `e^s (z + g)` alone — the drift term can
+  pay for a negative learning operator, so feasibility does not subsume the
+  sign condition here.
 - `pinn/problems/three_arm/` — the ABC-test problem, one module per concern
   (`sample.py` with the wedge fold, `simplex.py` plain quadratic-max calculus,
   `model.py`, `loss.py`), fully derived (kb/three_arm.md, "nothing
@@ -251,9 +260,13 @@ not results:
 
     two_arm 5.704   two_arm_drift 98.9   three_arm 1.42e-3   three_arm_drift 3.02
 
-- two_arm: `two_arm.pt` -> `two_arm.16x16.pt`, a SUBSOLUTION net. The
-  two_arm_v2 experiment was PROMOTED 2026-08-15 and is gone: its objective is
-  now two_arm's own (kb/two_arm.md section 10) and the two-sided residual it
+Both two-arm problems have since left that scale entirely: they are graded by
+the SUBSOLUTION objective, whose numbers are a violation and a climb, not a
+two-sided residual. The line above is a baseline for the three-arm pair only.
+
+- two_arm: `two_arm.pt` -> `two_arm.16x16.pt`, a SUBSOLUTION net -- the
+  objective changed 2026-08-15 to maximize the premium subject to
+  `v <= max H` (kb/two_arm.md section 10), and the two-sided residual it
   replaced exists only in that record. Against the net it replaced: overclaiming states 23.7% -> 0.60%,
   sup(residual+) 2.08e-2 -> 4.27e-4, premium and BC1 intact -- and a two-sided
   pde FOUR ORDERS worse (8.2e-6 -> 1.55e-1) that the arena cannot detect
@@ -263,14 +276,19 @@ not results:
   `L_ab < 0` from 16.0% to 6.8%. THE TWO ARE NOT COMPARABLE ON pde: one was
   fitted two-sided, the other maximizes the premium subject to not
   overclaiming. Judge replacements on the certificate numbers and the arena.
-- two_arm_drift: `two_arm_drift.pt` — the 10x-positivity net, bootstrapped
-  `--from data/two_arm.pt` (the exact `etahat = 0` slice) with the raised
-  weight on from step 0. It beat its predecessor on every training-side
-  metric: the targeted
-  middle decade `etahat` in [1, 10) went 10.5% -> 6.5% violating, and the
-  top decades cleaned up too. Bootstrapping rather than resuming was
-  deliberate: every 2ad net that acquired the term partway through kept a
-  commit-on-no-evidence needle near the ridge. No kink branch.
+- two_arm_drift: `two_arm_drift.pt` -> `two_arm_drift.24x24.pt`, a SUBSOLUTION
+  net since 2026-08-16, trained off the two-sided champion it replaced
+  (kept as `two_arm_drift.24x24.two-sided.pt`, since the two are NOT
+  comparable on pde and the arena record below is measured against it).
+  Mean violation 1.20e-3 -> 3.03e-5, overclaiming states 26.1% -> 2.04%, for
+  2% of the premium; `L_ab < 0` holds at 0.01%. The arena cannot detect the
+  change, which is the expected result and not a disappointment: 10,000
+  paired reps at production parameters, -119 +/- 321 in the deployment drift
+  world and -69 +/- 423 in the harsh one, both ~3,000 and ~4,300 ahead of
+  Thompson. Judge replacements on the certificate numbers and the arena.
+  CONVERGED FOR THIS TOPOLOGY: three learning rates, 1e-4 (19x), 3e-5 (38%),
+  1e-5 (2%) -- the last cut bought nothing, so the floor is 24x24's, not the
+  schedule's, and the next lever is width or a kink graft. No kink branch.
 - three_arm: `three_arm.pt` — 3 hidden layers with 8 stitched saturated kink
   units, trained through the concavity term overnight 2026-08-10. The kink
   stitch was the decisive move (tail -19%, worst point -25% in one 30k run,
@@ -368,6 +386,13 @@ Open frontiers:
   benchmark3. Do it AFTER the natural-units
   retrains: grading decisions before the equation is solved in that regime
   is fixing the second problem first.
+- THE DROP-ONE HEURISTIC IS THE BASELINE, not Thompson (kb/three_arm.md
+  section 17). `u = max(p_ab, p_ac)` -- two frozen two_arm evaluations and a
+  max, no three-arm training -- beats Thompson by 16% and matches the
+  three_arm champion (9,000 paired reps: -3410 [-3796, -3023] against TS,
+  +571 [-28, +1171] against the champion). Any new three-arm work is
+  measured against IT. three_arm_v3, which tried to learn a correction on
+  top of that base, was scrubbed 2026-08-16 having added +412 [-44, +867].
 - The b/c-junction blob (three_arm) at ~±0.07 relative, best ever, still
   the dominant error; systematically POSITIVE (v > max H), which also
   inflates the net's value claims ~9% above its policy's simulated value.

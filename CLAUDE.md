@@ -55,7 +55,8 @@ pairwise signs. Earlier drafts used `U` for the even part
   data/<ckpt>.pt` (three_arm wedge slices, tau lines, symmetric-point table).
 - The arena (policy shoot-out vs TS/ETC/elimination on discrete epochs,
   regret vs true effects): `poetry run arena simulate <out.pkl> --problem
-  two_arm|two_arm_drift|three_arm --rho ... --size N --workers K --eta E`,
+  two_arm|two_arm_drift|three_arm|three_arm_drift --rho ... --size N
+  --workers K --eta E`,
   then `poetry run arena analyze <out.pkl>`. The runner is always
   drift-aware; `--eta 0` (the default) is a static world and no branch
   anywhere depends on it. Realistic parameter values live outside the repo
@@ -90,7 +91,7 @@ Organized one-module-per-problem; the separation should be kept:
   only, no prior baked in; below that is 100x/decade stiffer territory nobody
   visits; same principle as three_arm's sampling), strictly `muhat > 0`. The
   loss is the SUBSOLUTION objective of kb/two_arm.md section 10 -- maximize
-  the premium subject to `v <= max H`, so a trained net is a certified lower
+  the premium subject to `v <= max H`, so a trained net is a proven lower
   bound rather than a two-sided fit, and `u = 0` is rejected by the objective
   instead of needing a degeneracy breaker. Read that section before touching
   the weights: a squared violation, a gate-units climb and dual ascent on the
@@ -283,7 +284,7 @@ two-sided residual. The line above is a baseline for the three-arm pair only.
   2026-08-09 through an escalating pos_learning weight, which took floor-decade
   `L_ab < 0` from 16.0% to 6.8%. THE TWO ARE NOT COMPARABLE ON pde: one was
   fitted two-sided, the other maximizes the premium subject to not
-  overclaiming. Judge replacements on the certificate numbers and the arena.
+  overclaiming. Judge replacements on the bound numbers and the arena.
 - two_arm_drift: `two_arm_drift.pt` -> `two_arm_drift.24x24.pt`, a SUBSOLUTION
   net since 2026-08-16, trained off the two-sided champion it replaced
   (kept as `two_arm_drift.24x24.two-sided.pt`, since the two are NOT
@@ -293,7 +294,7 @@ two-sided residual. The line above is a baseline for the three-arm pair only.
   change, which is the expected result and not a disappointment: 10,000
   paired reps at production parameters, -119 +/- 321 in the deployment drift
   world and -69 +/- 423 in the harsh one, both ~3,000 and ~4,300 ahead of
-  Thompson. Judge replacements on the certificate numbers and the arena.
+  Thompson. Judge replacements on the bound numbers and the arena.
   CONVERGED FOR THIS TOPOLOGY: three learning rates, 1e-4 (19x), 3e-5 (38%),
   1e-5 (2%) -- the last cut bought nothing, so the floor is 24x24's, not the
   schedule's, and the next lever is width or a kink graft. No kink branch.
@@ -307,26 +308,33 @@ two-sided residual. The line above is a baseline for the three-arm pair only.
   trained three-arm net to manage it: 20,000 paired reps in two disjoint seed
   blocks, -863 +/- 354 against drop-one, -398 +/- 352 against the old
   champion, -4354 +/- 280 against Thompson. The champion margin is 2.2 sigma
-  -- suggestive, not established; it was promoted on the certificate with the
+  -- suggestive, not established; it was promoted on the bound numbers with the
   arena as corroboration. Its architecture is unchanged and still the decisive
   move of 2026-08-10: 3 hidden layers with 8 stitched saturated kink units
   (tail -19%, worst point -25% in one 30k run, junction specialist unit
   self-oriented onto `z_bc`). A from-scratch 16-kink co-training run gave
   communal branch anatomy and no junction specialist -- sequencing is
   load-bearing, see learnings section 8.
-- three_arm_drift: `three_arm_drift.pt` — concavity-trained 2026-08-10. Still the
-  furthest from converged of the four (its starting pde is ~3 orders above
-  three_arm's) and it was descending when stopped. Grafted from the
-  pre-2026-08-07 three_arm champion, so its bit-exact-at-`etahat = 0`
-  ancestry can no longer be re-derived from a filename. SUPERSEDED IN FLIGHT
-  2026-08-13: every 3ad net to date trained on a mis-sampled law — the
-  det-only floor admitted states with one pair coordinate 2-4 decades below
-  `PRIOR_FLOOR`, float32-ungradeable and carrying 98% of the pde loss, which
-  was the ~1e0 loss wall (kb/three_arm_drift.md section 6; the fence and
-  its measured before/after live in sample.py). Pair floor restored,
-  CONCAVITY_WEIGHT re-derived 1.2 -> 2.2e-1; a from-scratch 96:96:96 at
-  lr 1e-3 is on the pod (`/workspace/3ad_fenced.log`), past the old 30k
-  endpoint by iter 3k.
+- three_arm_drift: `three_arm_drift.pt` -> `three_arm_drift.128x128x128k16.pt`,
+  promoted 2026-08-17 and TRAINED FROM SCRATCH -- no ancestry from any earlier
+  3ad net, which is why the whole pre-2026-08-13 mis-sampled lineage is simply
+  gone rather than migrated. Its predecessor is kept as
+  `three_arm_drift.128x128x128k16.two-sided.pt`. Against it: overshoot
+  3.80e-2 -> ~2.4e-2, non-concave states 8.6% -> 1.1%, and the ARENA
+  -30,028 +/- 4,569 over 3,000 paired reps, 38% less regret at 13 sigma.
+  READ THIS BEFORE TRAINING IT FURTHER, because it inverts the other three
+  problems: THE BOUND AND THE POLICY POINT IN OPPOSITE DIRECTIONS HERE.
+  Annealing SLACK_PRICE to 0.005 took overshoot to 1.4e-3 (18x better than the
+  predecessor) and made the arena WORSE, and the 0.1 stage was catastrophic
+  (164,776 against Thompson's 31,882). The promoted net is therefore the
+  SYMMETRIC one, `SLACK_PRICE = 0.5`, and the annealed variant is kept beside
+  it as `.annealed.pt` for whoever wants the tighter bound. kb/three_arm_drift.md
+  section 11 has the ladder, the arena table and the diagnosis.
+  STILL LOSES TO THOMPSON, by 1.5x, where the other three problems' nets win:
+  every 3ad net ever trained commits on 100% of reps, most having bought ~70
+  units of evidence against Thompson's 1,100. Commit-on-no-evidence at the
+  flat prior is the open frontier and it is a POLICY problem -- an order of
+  magnitude of residual improvement did not touch it.
 
 The headline (2026-08-06): in the arena, at realistic parameters (values in
 project memory, not committed), the two_arm PINN policy beat
@@ -418,7 +426,7 @@ Open frontiers:
 - The b/c-junction blob (three_arm): the one-sided half of the subsolution
   program SHIPPED 2026-08-16 and took overclaiming from 26.8% to 1.44%. The
   constant-shift half is measured and NOT adopted: the uniform shift is
-  priced by the worst point in the domain, and at that price the certified
+  priced by the worst point in the domain, and at that price the shifted
   net (mean premium 0.4235) loses to the drop-one bound (0.4307), which is
   provable for free. At q99.9 it wins by 7.8%, and the sup estimate is not
   stable across draw counts. Section 18 has the numbers; the state-dependent

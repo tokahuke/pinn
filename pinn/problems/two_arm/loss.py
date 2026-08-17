@@ -9,13 +9,13 @@ V* is the MAXIMAL subsolution of the HJB (learnings section 9), so
     maximize  u   subject to   v <= max H
 
 has the true value function as its optimum, and any feasible point is a
-certified lower bound: the greedy policy provably earns at least v. Two
+proven lower bound: the greedy policy provably earns at least v. Two
 consequences the two-sided residual does not give:
 
 - The never-explore degeneracy dies in the OBJECTIVE. u = 0 zeroes the
   two-sided residual exactly, which is why two_arm needs RIDGE_WEIGHT 2e4 to
   outvote it; here u = 0 is merely feasible, and the climb term rejects it.
-- The certificate is what training optimizes, rather than something measured
+- The bound is what training optimizes, rather than something measured
   afterwards on a net that was never asked for it.
 
 The cost: the climb term's gradient never vanishes, so the loss settles at a
@@ -46,9 +46,39 @@ from .sample import sample_ridge, sample_sobol
 # premium.
 CLIMB_WEIGHT = 1.0e-7
 
+# What one unit of SLACK costs, as a share of the residual budget: the two
+# sides are priced (1 - SLACK_PRICE) and SLACK_PRICE, so they always sum to 1
+# and moving this reallocates between them WITHOUT rescaling the objective --
+# which is what keeps RIDGE_WEIGHT and every other weight calibrated against
+# the residual valid across a sweep. This is the pinball loss at
+# q = 1 - SLACK_PRICE: 0 is the pure subsolution objective (today's, exactly),
+# 0.5 is the symmetric two-sided loss in L1, and above 0.5 prefers
+# supersolutions, which is the wrong side for a lower bound.
+#
+# WHY SLACK IS PRICED AT ALL: the climb is a global MEAN, so it cannot say
+# WHERE to climb -- the net climbs where that is cheap and sags where it is
+# not. Slack is undershoot, `v < max H`, which is also exactly what INFLATING
+# max H produces, so pricing it charges for the learning-number inflation that
+# is otherwise free. FROM SCRATCH, ~35k iterations, against the polished
+# champion's climb 2479 and mean learning number 5.44:
+#
+#     SLACK_PRICE    climb    L      overshoot   over%
+#     0              1592    48.79    2.6e-4      5.8%
+#     0.02           2487     5.18    9.1e-4      9.7%
+#
+# At 0 the premium sits 37% below V* and the Hamiltonian is 9x wrong while the
+# OVERSHOOT metric looks better -- the loss was being gamed, not satisfied.
+# 0 stays the default here because this problem's champion was polished at 0
+# from a converged two-sided net; 0.02 is for COLD STARTS, annealed back to 0
+# to tighten the bound once the solution is found.
+SLACK_PRICE = 0.0
+
 # BC1's share of the constraint. Calibrated against a SATISFIED ridge, which
 # is the state it has to defend: two_arm's own long-standing value, kept
-# because the climb term cannot see the wall at all.
+# because the climb term cannot see the wall at all. It is ALSO the
+# never-explore breaker whenever SLACK_PRICE > 0: the commit envelope scores
+# the priced residual exactly 0 on both sides, so only the ridge and the climb
+# reject it.
 RIDGE_WEIGHT = 2.0e4
 
 # pos_learning is REMOVED from the objective and kept only as a printed
@@ -70,26 +100,32 @@ def subsolution_loss(
     value: DimensionlessValueFunction, muhat: Tensor, tauhat: Tensor
 ) -> tuple[Tensor, Tensor, Tensor]:
     """
-    Returns the violation, the climb and the learning-operator negative part.
+    Returns the priced residual, the climb and the learning-operator
+    negative part.
 
-    The violation is the POSITIVE part of the natural-units residual, squared:
-    v > max H is the overclaim that breaks the certificate, while v < max H is
-    merely a slack subsolution and is left free -- the climb term is what
-    tightens it. Natural units and never scaled, as everywhere else.
+    The residual is split by SIGN and the two sides priced against each other:
+    `v > max H` is the overclaim that breaks the bound, `v < max H` is
+    slack. Slack was free until 2026-08-16 and the two ways of exploiting that
+    are measured in SLACK_PRICE's comment. Natural units and never scaled, as
+    everywhere else.
     """
     lhs, best, l_ab = value.hamiltonian(muhat, tauhat)
     natural = tauhat.pow(1.5)
+    residual = (lhs - best.value) / natural
 
     # LINEAR, not squared, for two reasons that point the same way. An L1
     # penalty is EXACT: the constrained optimum is reached at a finite
     # weight, with the constraint active and points sitting on it, while a
     # quadratic penalty only approaches feasibility as the weight grows and
     # at any finite weight overshoots by O(CLIMB_WEIGHT) -- fatal for a term
-    # whose whole purpose is a certificate. And it is what the house does for
+    # whose whole purpose is a proven bound. And it is what the house does for
     # every other sign condition: pos_learning and three_arm's concavity are
     # both linear, because squaring chases depth while the violating FRACTION
     # rises (two_arm_drift, 2026-08-08).
-    violation = torch.relu((lhs - best.value) / natural).mean()
+    violation = (1.0 - SLACK_PRICE) * torch.relu(residual).mean()
+
+    if SLACK_PRICE > 0.0:
+        violation = violation + SLACK_PRICE * torch.relu(-residual).mean()
 
     # Natural units, matching the violation above: u / tauhat**1.5 is the
     # premium in the units the residual is graded in.

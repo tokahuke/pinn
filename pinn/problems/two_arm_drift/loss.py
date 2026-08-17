@@ -12,7 +12,7 @@ Two differences from two_arm, both from the drift term
   violation is then exactly the premium -- but that identity needs the left
   side to be e^s (z + g) alone. Here the drift term can pay for a negative
   learning operator, so the constraint no longer subsumes the sign condition.
-- The certificate is the same one: any feasible point is a lower bound on V*,
+- The argument is the same one: any feasible point is a lower bound on V*,
   since the drift term is part of the generator, not an extra source.
 """
 
@@ -38,7 +38,7 @@ from .sample import sample_ridge, sample_sobol
 # through 1e-3 indistinguishable, which is a horizon artifact -- the trade
 # takes ~50k iterations to open. Over 136k it bought 0.9% of climb for 56% more
 # violation depth and 2.5x the sign violations, every column monotone: the
-# objective improves while the certificate rots, which is what pricing the
+# objective improves while the bound rots, which is what pricing the
 # constraint too cheaply looks like.
 #
 # Diagnosis: violation RISING with a flat climb means this is too high; climb
@@ -49,6 +49,20 @@ CLIMB_WEIGHT = 1.0e-7
 # BC1's share of the constraint. Calibrated against a SATISFIED ridge, which is
 # the state it has to defend; the climb term cannot see the wall at all.
 RIDGE_WEIGHT = 2.0e4
+
+# What one unit of SLACK costs, as a share of the residual budget: the two
+# sides are priced (1 - SLACK_PRICE) and SLACK_PRICE, so they always sum to 1
+# and moving this reallocates between them WITHOUT rescaling the objective,
+# which keeps every weight calibrated against the residual valid across a
+# sweep. The pinball loss at q = 1 - SLACK_PRICE: 0 is the pure subsolution
+# objective, 0.5 the symmetric two-sided loss in L1, above 0.5 the wrong side
+# for a lower bound.
+#
+# The climb is a global MEAN and cannot say WHERE to climb, so at 0 a
+# from-scratch net sags below V* and inflates the learning number to buy free
+# slack -- measured on two_arm, whose loss carries the table. 0 is the default
+# because this problem's champion was polished at 0; 0.02 is for COLD STARTS.
+SLACK_PRICE = 0.0
 
 # L_ab >= 0, provable and not implied by feasibility here (see the docstring).
 # SATURATED: relu is linear in depth, so one deep violation dominates
@@ -76,7 +90,7 @@ def subsolution_loss(
     negative part.
 
     The violation is the POSITIVE part of the natural-units residual: v > max H
-    is the overclaim that breaks the certificate, while v < max H is merely a
+    is the overclaim that breaks the bound, while v < max H is merely a
     slack subsolution and is left free -- the climb is what tightens it. LINEAR,
     because the L1 penalty is exact at a finite weight where a quadratic one
     only approaches feasibility.
@@ -84,7 +98,11 @@ def subsolution_loss(
     lhs, best, l_ab = value.hamiltonian(muhat, tauhat, etahat)
     natural = tauhat.pow(1.5)
 
-    violation = torch.relu((lhs - best.value) / natural).mean()
+    residual = (lhs - best.value) / natural
+    violation = (1.0 - SLACK_PRICE) * torch.relu(residual).mean()
+
+    if SLACK_PRICE > 0.0:
+        violation = violation + SLACK_PRICE * torch.relu(-residual).mean()
     climb = (value.premium(muhat, tauhat, etahat) / natural).mean()
     negative = torch.relu(-l_ab)
 

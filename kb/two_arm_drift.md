@@ -410,7 +410,7 @@ two-sided residual it replaced survives only in this record.
     loss = violation + RIDGE * ridge + POSITIVITY * pos_learning - CLIMB * climb
     RIDGE 2e4, POSITIVITY 2e-2, CLIMB 1e-7
 
-The certificate argument is unchanged: the drift term is part of the generator,
+The bound argument is unchanged: the drift term is part of the generator,
 not an extra source, so a feasible `v` is still a lower bound on `V*`.
 
 - pos_learning STAYS, where two_arm deleted it by proof. That proof needs the
@@ -460,7 +460,7 @@ violation moves. ARENA, 10,000 paired reps at production parameters, both drift
 worlds: `-119 +/- 321` in the deployment world and `-69 +/- 423` in the harsh
 one -- indistinguishable from zero, faintly favourable in both, and ~3,000 and
 ~4,300 ahead of Thompson. Same shape as two_arm's promotion: the arena cannot
-see the difference and the certificate is the entire gain.
+see the difference and the bound is the entire gain.
 
 CONVERGED FOR 24x24, by the returns per learning rate -- 1e-4 over 122k gave
 19x, 3e-5 over 330k gave 38%, 1e-5 over 116k gave 2%. A cut that buys nothing

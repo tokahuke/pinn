@@ -365,9 +365,9 @@ bucketed by the suspected cause.
   degenerate argmax — a small operator-sign error flipped the Hamiltonian
   convex in an untrained decade and the policy vertex-committed on zero
   evidence; (b) commit-boundary placement (one-way doors cost linearly);
-  (c) any use of v as a NUMBER (pricing, certificates, basis functions for
+  (c) any use of v as a NUMBER (pricing, proven bounds, basis functions for
   the next problem). Spend accuracy there, not on the bulk mean.
-- **The subsolution program: the residual's SIGN is the certificate.** If
+- **The subsolution program: the residual's SIGN is what proves the bound.** If
   v <= max H everywhere (plus obstacle/growth conditions), the greedy
   policy provably achieves at least v. The Hamiltonian reads only
   derivatives, so v - c has the same policy for any constant c and residual
@@ -389,7 +389,7 @@ bucketed by the suspected cause.
   evidence -- an early verdict here was "scrub it, the pde climbed four
   orders", and the arena reversed it. And a value function can be a poor
   solution of its own equation while being an excellent policy, so
-  "accuracy" has to be named: accuracy of the VALUE (certificates,
+  "accuracy" has to be named: accuracy of the VALUE (proven bounds,
   pricing, basis functions) and accuracy of the POLICY are different
   currencies, and only the second one pays regret.
 - **A near-subsolution becomes an EXACT one by subtracting a constant.**
@@ -397,7 +397,7 @@ bucketed by the suspected cause.
   operator `L` is built from derivatives only, the max reads `L` and the state,
   and the discount term carries `v` with coefficient exactly 1 -- so
   `N[v - c] = N[v] - c`, everywhere, exactly. Take `c = sup relu(N[v])` and
-  `v - c` is a certified lower bound on `V*`. Verified on two_arm_drift at
+  `v - c` is a proven lower bound on `V*`. Verified on two_arm_drift at
   c = 1e-3, 1e-2, 1e-1: the residual drops by c to within 2.4e-4, an error
   CONSTANT IN c, i.e. float32 noise in evaluating the residual rather than a
   missing term. THE PRICE IS SET BY THE SUP, NOT THE MEAN, and the two are not
@@ -408,7 +408,7 @@ bucketed by the suspected cause.
   shift against the value: 0.35% median, 5.7% at q90, and MORE THAN THE WHOLE
   VALUE at the worst states -- 4.2% of states have `v < 0.1` (near-tie, high
   precision) and a uniform absolute shift eats them. Grade a high quantile if
-  the certificate is the deliverable.
+  the bound is the deliverable.
   PARKED GENERALIZATION (2026-08-16, untested): `L` is the heat operator up to
   a positive factor -- substituting `sigma = -1/tauhat`,
   `L = (1/tauhat^2)[d_sigma + (1/2) d_mumu]`, so "heat time" is minus the
@@ -425,6 +425,29 @@ bucketed by the suspected cause.
   negative exactly at the states that set the price; the exponential one keeps
   a positive denominator whenever `lambda < sqrt(2)/etahat`, and `etahat` is a
   PARAMETER that `L` never differentiates, so `lambda` may depend on it.
+- **A one-sided objective needs a PRICE ON SLACK, and it is a schedule.**
+  Penalizing only the unsafe side leaves the safe side free, and a net will
+  take a free side every time: cold-started two_arm settled 37% below V* with
+  its learning number 9x too big, and three_arm_drift inflated its ceiling
+  until slack hit 40x the champion's. Price both sides as a convex
+  combination, `(1-p) * mean(relu(r)) + p * mean(relu(-r))` -- the pinball
+  loss -- so the two shares sum to 1 and moving `p` reallocates without
+  rescaling the objective, which is what keeps every auxiliary weight
+  calibrated against it valid across a sweep. `p = 0.5` is the symmetric loss,
+  `p = 0` the pure one-sided bound. SYMMETRIC FINDS THE FUNCTION AND
+  ASYMMETRIC TIGHTENS THE BOUND: one price cannot do both, so run symmetric to
+  convergence and
+  anneal down. Anneal ONLY AS FAST AS THE STEP SIZE ALLOWS -- the identical
+  price step drove the violation up 14% at lr 1e-4 and descended cleanly at
+  1e-5 from the same net. Each step down bought 2.6-4x on the unsafe side and
+  cost ~1% of the value.
+- **A tighter bound can move OPPOSITE to the policy.** On three_arm_drift,
+  ranking four nets by arena regret inverts their ranking by overshoot: the
+  tightest-bounded net is mediocre, one with a tight bound is catastrophic,
+  and the stage with no asymmetry at all is the best policy. The bullet above
+  says policy error is second order and the two are different currencies;
+  this is the case where paying one actively cost the other, and it is why
+  an arena gate belongs on every promotion rather than a residual gate.
 - **Benchmark policies in a discrete-epoch regret arena against the true
   effect, with the environment's parameters, not the trainer's.** Pieces
   that mattered: PAIR the seeds (same effect draw and noise stream across

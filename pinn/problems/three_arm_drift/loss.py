@@ -1,6 +1,24 @@
 """
-Losses for the three-arm drift problem: the interior HJB residual, the two tie
-losses of doc section 5, and the trainer-facing objective.
+The three-arm drift objective: maximize the premium subject to not
+overclaiming. three_arm/loss.py is the same objective without drift and
+kb/three_arm.md section 18 is its record; read that first, then this.
+
+Everything three_arm's version says carries over -- the climb needs no units
+factor (value-form grading), and concavity is not subsumed by feasibility
+because at N = 3 the max can sit on a simplex EDGE. Two things are different
+in degree rather than kind, and both come from this being the least converged
+of the four problems:
+
+- CONCAVITY IS LIVE HERE. three_arm's champion violates it on 0.02% of states,
+  so the term is a guard; this problem's best net violates on 8.6%, so it is
+  doing real work and its weight is load-bearing rather than nominal.
+- SLACK_PRICE SHIPS AT 0.5 HERE AND AT 0 EVERYWHERE ELSE, which is not an
+  oversight. On this problem the bound and the policy are INVERTED: annealing
+  the price down to 0.005 took overshoot from 2.4e-2 to 1.4e-3 and made the
+  ARENA WORSE (48,686 -> 60,442 regret), and the price-0.1 stage was
+  catastrophic at 164,776. The champion promoted 2026-08-17 is the SYMMETRIC
+  net, so the objective that produced it is the objective that ships.
+  kb/three_arm_drift.md section 11 has the ladder and the arena table.
 """
 
 from __future__ import annotations
@@ -16,15 +34,37 @@ from ..three_arm.loss import directional_learning, on_device
 from .model import DimensionlessValueFunction
 from .sample import RidgeSample, Sample
 
-# Dead-solution floor, three_arm's rule, against the MEDIAN pde over several
-# draws -- the previous 1.9e4 came from a single heavy-tailed draw reading 187
-# where the median is 2.4, and left the ties at 135% of the equation.
+# The ties PLACE the solution: the climb term kills the never-explore
+# degeneracy on its own, but nothing else in the objective knows where the free
+# boundary belongs. Carried over from the two-sided loss, where it was set
+# against a pde median of 2.4; the anchor is now a violation of 3.6e-2, so this
+# is provisional and wants re-deriving once the retrain settles.
 TIE_WEIGHT = 2.4e2
 
-# Plain mean-of-squares. P = 2 compensated for the chart weight's suppressed
-# tail; in natural units it over-corrects, dropping the effective sample size
-# at batch 4096 to 2.1 points on three_arm (54 at P = 1).
-POWER = 1.0
+# OFF: SLACK_PRICE is the upward pull now, and the ties are the degeneracy
+# breaker they were for years under the two-sided loss. The 10x-dead-solution
+# -floor rule that set this at 2.4e-1 is WRONG on a problem whose violation is
+# two orders above three_arm's -- measured on the cold start, the climb term
+# came to 1.08 against a violation of 0.18, so the objective was 85% "maximize
+# u" and the premium duly ran to 3x the champion's. That rule only looked sane
+# on three_arm because its violation was already tiny.
+CLIMB_WEIGHT = 0.0
+
+# What one unit of SLACK costs, as a share of the residual budget: the two
+# sides are priced (1 - SLACK_PRICE) and SLACK_PRICE, so they sum to 1 and
+# moving this reallocates between them WITHOUT rescaling the objective. The
+# pinball loss at q = 1 - SLACK_PRICE; 0 is the pure subsolution objective,
+# 0.5 the symmetric two-sided loss in L1.
+#
+# NONZERO HERE, unlike the three promoted problems, because this net is a COLD
+# START and they were polished from converged two-sided nets. At 0 the climb is
+# a global mean that cannot say WHERE to climb: measured on two_arm from
+# scratch, the premium settled 37% below V* while the learning number inflated
+# to 9x the champion's, and pricing slack at 0.02 fixed both (two_arm/loss.py
+# carries the table). It is also the direct charge for the runaway this
+# problem showed at every CLIMB_WEIGHT including 0 -- inflating max H drives
+# the residual negative, which is exactly what slack now costs.
+SLACK_PRICE = 0.5
 
 # Concavity, three_arm's term verbatim -- the erosion is control-free, so the
 # drift Hessian is the static one, and the SCALE is three_arm's too. It sat at
@@ -41,9 +81,13 @@ CONCAVITY_SCALE = 1.0e-3
 CONCAVITY_WEIGHT = 2.2e-1
 
 
-def pde_loss(value: DimensionlessValueFunction, draw: Sample) -> tuple[Tensor, Tensor]:
+def subsolution_loss(
+    value: DimensionlessValueFunction, draw: Sample
+) -> tuple[Tensor, Tensor, Tensor]:
     """
-    Returns TWO numbers. The first is the interior HJB residual in value form
+    Returns THREE numbers: the violation, the climb and the concavity term.
+
+    The violation is the POSITIVE part of the residual of the HJB in value form
     (doc section 2; the static pieces in three_arm.md sections 4, 7, 10),
     units rho = sigma = 1, i.e. the dimensionless form (doc section 4):
     v = max over the simplex of alpha.m + pairwise learning terms; graded in
@@ -55,7 +99,7 @@ def pde_loss(value: DimensionlessValueFunction, draw: Sample) -> tuple[Tensor, T
     section 5 break the degeneracy.
 
     The second is the sampled-direction concavity term, three_arm's verbatim
-    (see three_arm/loss.py:pde_loss for the derivation and design record) --
+    (see three_arm/loss.py for the derivation and design record) --
     the erosion is control-free and never touches the Hamiltonian's Hessian.
     """
     # The derivation (learning numbers, Hamiltonian, simplex max) lives on
@@ -64,27 +108,28 @@ def pde_loss(value: DimensionlessValueFunction, draw: Sample) -> tuple[Tensor, T
         draw.m_b, draw.m_c, draw.tau_bb, draw.tau_bc, draw.tau_cc, draw.etahat
     )
     theta = torch.rand_like(l_ab) * math.pi
-    violation = torch.relu(-directional_learning(l_ab, l_ac, l_bc, theta))
+    non_concave = torch.relu(-directional_learning(l_ab, l_ac, l_bc, theta))
     # SATURATED, as two_arm_drift's positivity term: relu is linear in depth,
     # so one deep point dominates -- the worst carried 7x the whole term's
     # mean. y / (s + y) is bounded per point, linear below s, 1/y^2 above; NOT
     # tanh (float32 gradient underflows, CLAUDE.md traps). Zero set untouched.
     # s sits just above the median violation, so lower it as the net converges.
-    concavity = (violation / (CONCAVITY_SCALE + violation)).mean()
+    concavity = (non_concave / (CONCAVITY_SCALE + non_concave)).mean()
 
     # NATURAL UNITS, NEVER SCALED -- the premium-units weight is gone, and the
     # standing rule against reintroducing one lives in three_arm/loss.py.
-    #
-    # Power-mean attention (learnings section 7); at POWER = 1 this is plain
-    # mean-of-squares. Normalized by the detached batch mean so pow(P) sees
-    # O(1) numbers, not float32 dust.
-    graded = (v - best.value).pow(2)
-    scale = graded.mean().detach().clamp_min(1e-30)
+    # LINEAR, because an L1 penalty is EXACT at a finite weight where a
+    # quadratic only approaches feasibility.
+    residual = v - best.value
+    violation = (1.0 - SLACK_PRICE) * torch.relu(residual).mean()
 
-    return (
-        scale * (graded / scale).pow(POWER).mean().pow(1.0 / POWER),
-        concavity,
-    )
+    if SLACK_PRICE > 0.0:
+        violation = violation + SLACK_PRICE * torch.relu(-residual).mean()
+    climb = value.premium(
+        draw.m_b, draw.m_c, draw.tau_bb, draw.tau_bc, draw.tau_cc, draw.etahat
+    ).mean()
+
+    return violation, climb, concavity
 
 
 def control_tie_loss(value: DimensionlessValueFunction, draw: RidgeSample) -> Tensor:
@@ -169,22 +214,24 @@ def loss(
     treatment_draw: RidgeSample,
     iteration: int | None = None,
 ) -> Tensor:
-    pde_residual, concavity = pde_loss(value, draw)
+    violation, climb, concavity = subsolution_loss(value, draw)
     control_residual = control_tie_loss(value, control_draw)
     treatment_residual = treatment_tie_loss(value, treatment_draw)
 
     if iteration is not None:
         print(
-            f"iter {iteration}: pde {pde_residual.item():.3e}"
+            f"iter {iteration}: violation {violation.item():.3e}"
+            f"  climb {climb.item():.4e}"
             f"  control_tie {control_residual.item():.3e}"
             f"  treatment_tie {treatment_residual.item():.3e}"
             f"  concavity {concavity.item():.3e}"
         )
 
     return (
-        pde_residual
+        violation
         + TIE_WEIGHT * (control_residual + treatment_residual)
         + CONCAVITY_WEIGHT * concavity
+        - CLIMB_WEIGHT * climb
     )
 
 
@@ -245,9 +292,15 @@ if __name__ == "__main__":
     for etahat in [0.0, 1.0, 10.0, 35.0]:
         batch = Sample.draw(2048)
         batch.etahat = torch.full_like(batch.etahat, etahat)
-        envelope_loss, envelope_concavity = pde_loss(zero, batch)
+        envelope_violation, envelope_climb, envelope_concavity = subsolution_loss(
+            zero, batch
+        )
 
-        assert envelope_loss.item() < 1e-8, (etahat, envelope_loss.item())
+        # THE POINT OF THIS OBJECTIVE: the commit envelope is FEASIBLE at every
+        # drift -- it solves the interior equation exactly -- but climbs
+        # nothing, so the objective rejects it without help from the ties.
+        assert envelope_violation.item() < 1e-8, (etahat, envelope_violation.item())
+        assert envelope_climb.item() == 0.0, (etahat, envelope_climb.item())
 
         # Concavity is EXACTLY silent on the degenerate solution at every
         # drift: all learning numbers are 0, no clamp residue to tolerate.
@@ -400,9 +453,9 @@ if __name__ == "__main__":
 
     # The graded residual only: the concavity term draws a fresh direction
     # per call (only its zero set is chart-invariant).
-    original_loss, _ = pde_loss(invariant, clone(batch))
-    swapped_loss, _ = pde_loss(invariant, clone(swapped))
-    relabeled_loss, _ = pde_loss(invariant, clone(relabeled))
+    original_loss, _, _ = subsolution_loss(invariant, clone(batch))
+    swapped_loss, _, _ = subsolution_loss(invariant, clone(swapped))
+    relabeled_loss, _, _ = subsolution_loss(invariant, clone(relabeled))
 
     # RELATIVE tolerance, not absolute: the natural-units loss is no longer a
     # fixed-size number (it moved 4 orders on 2026-08-10 and moves again with
@@ -419,4 +472,30 @@ if __name__ == "__main__":
         relabeled_loss.item(),
         original_loss.item(),
     )
+    from pathlib import Path
+
+    champion = Path("data/three_arm_drift.pt")
+
+    if champion.exists():
+        trained = DimensionlessValueFunction.load(champion)
+        fit = subsolution_loss(trained, Sample.draw(8192).fold())
+
+        # THE TIES are the degeneracy breaker here, not the climb: the commit
+        # envelope scores the priced residual 0 on BOTH sides at any
+        # SLACK_PRICE, so nothing in the residual can reject it. The control
+        # tie reads exactly 1.0 on it (asserted above), which at TIE_WEIGHT
+        # buys a margin no live net comes close to.
+        envelope_total = TIE_WEIGHT * 1.0
+        fit_total = (
+            fit[0]
+            + TIE_WEIGHT
+            * (
+                control_tie_loss(trained, RidgeSample.control_tie(2048))
+                + treatment_tie_loss(trained, RidgeSample.treatment_tie(2048))
+            ).item()
+            + CONCAVITY_WEIGHT * fit[2]
+            - CLIMB_WEIGHT * fit[1]
+        )
+
+        assert fit_total < envelope_total, (fit_total, envelope_total)
     print("ok")

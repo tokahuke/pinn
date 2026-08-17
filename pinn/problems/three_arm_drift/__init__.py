@@ -18,7 +18,7 @@ from .loss import (
     draw,
     loss,
     objective,
-    pde_loss,
+    subsolution_loss,
     treatment_tie_loss,
 )
 from .model import (

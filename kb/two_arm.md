@@ -369,7 +369,7 @@ V* is the MAXIMAL subsolution of the HJB, so
     maximize u   subject to   v <= max H
 
 has the true value function as its optimum and every feasible point is a
-CERTIFIED lower bound: the greedy policy provably earns at least v (learnings
+PROVEN lower bound: the greedy policy provably earns at least v (learnings
 section 9). Built as the `two_arm_v2` clone, measured, and PROMOTED into
 `pinn/problems/two_arm/loss.py` on 2026-08-15; the clone is deleted and the
 two-sided residual it replaced survives only in this record. Its reason to
@@ -398,7 +398,7 @@ Four design points, each measured rather than argued:
   curves, which reads as being above the threshold: past it the weight stops
   mattering. TRUST THAT ONLY OVER A LONG RUN. The same probe on two_arm_drift
   showed five decades indistinguishable at 3k iterations and a monotone
-  certificate collapse by 50k (kb/two_arm_drift.md section 10).
+  collapse of the bound by 50k (kb/two_arm_drift.md section 10).
 - The climb is in the VIOLATION'S UNITS. A uniform climb (mean of the gate
   u / nu) lost the floor decade: the violation carries tauhat**-1.5, 3.2e4 at
   the floor, so the penalty outbid a flat climb by four orders there. The net
@@ -427,7 +427,7 @@ exercise:
     old champion            8.17e-6    23.7%       2.08e-2          21.09
     subsolution (promoted)  1.47e-1     0.60%      4.27e-4          21.73
 
-39x fewer overclaiming states and a 49x smaller certificate constant, with the
+39x fewer overclaiming states and a 49x smaller shift constant, with the
 premium intact (climb 2474 against 2497) and BC1 still at -0.4978. The pde is
 four orders WORSE, and that is the headline finding:
 

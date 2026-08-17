@@ -7,7 +7,7 @@ value wrapper), loss.py (the subsolution objective and both tie losses of doc
 section 12).
 
 The objective maximizes the premium subject to `v <= max H` since 2026-08-16
-(kb/three_arm.md section 18), so a trained net is a certified lower bound
+(kb/three_arm.md section 18), so a trained net is a proven lower bound
 rather than a two-sided fit.
 """
 

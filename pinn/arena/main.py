@@ -27,13 +27,28 @@ CHUNK = 4096
 def concrete_policies(cls: type[Policy] = Policy) -> Iterator[type[Policy]]:
     """
     Every instantiable Policy at any depth. __subclasses__ only sees direct
-    children, and the intermediates (the Bayesian bases) are abstract. Only
-    the chosen problem module is imported, so only its zoo is registered.
-    """
-    for sub in cls.__subclasses__():
-        yield from concrete_policies(sub)
+    children, and the intermediates (the Bayesian bases) are abstract.
 
-        if not isabstract(sub):
+    The caller MUST filter by module. This used to rely on only the chosen
+    problem being imported, which stopped being true when three_arm_drift
+    began reusing three_arm's policies: importing it registers both zoos, and
+    a sweep silently ran eleven classes for a four-policy problem, two of them
+    named Pinn, which the paired report then refused to align.
+    """
+    # DEDUPED: a drifting zoo's policy inherits from both the static policy
+    # and the drifting filter, so the recursion reaches it down two paths and
+    # would otherwise run it twice -- which is exactly what happened, and the
+    # doubled runs then failed to align against the singly-run Pinn.
+    seen = []
+
+    for sub in cls.__subclasses__():
+        for found in concrete_policies(sub):
+            if found not in seen:
+                seen.append(found)
+                yield found
+
+        if not isabstract(sub) and sub not in seen:
+            seen.append(sub)
             yield sub
 
 
@@ -46,7 +61,7 @@ def cli() -> None:
 @click.argument("runs", type=click.Path(dir_okay=False, path_type=Path))
 @click.option(
     "--problem",
-    type=click.Choice(["two_arm", "two_arm_drift", "three_arm"]),
+    type=click.Choice(["two_arm", "two_arm_drift", "three_arm", "three_arm_drift"]),
     default="two_arm",
     help="Which problem's zoo to sweep.",
 )
@@ -106,14 +121,18 @@ def simulate(
     # policy sees the same per-rep noise stream (until allocations diverge),
     # so cross-policy comparisons are paired -- and a rep's stream is
     # independent of its chunk, so chunking does not move any number.
-    classes = list(concrete_policies())
+    # A drifting zoo walks the truth as well as observing it, so it eats
+    # more of each rep's stream; the default keeps the static zoos byte-
+    # identical to every number already recorded.
+    appetite = getattr(module, "DRAWS_PER_EPOCH", 2)
+    classes = [c for c in concrete_policies() if c.__module__ == module.__name__]
     results: list[Run] = []
     total = size * len(classes)
 
     for cls in classes:
         for chunk_start in range(0, size, CHUNK):
             seeds = list(range(chunk_start, min(chunk_start + CHUNK, size)))
-            runner = Runner(params, seeds, device)
+            runner = Runner(params, seeds, device, appetite)
             policy = cls.init(params, len(seeds), device)
             batch = runner.run(module, policy, module.draw_effect(runner))
             results.extend(batch.runs())

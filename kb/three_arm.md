@@ -760,10 +760,10 @@ blob already lives. Known issues, decreasing weight:
    two_arm champion net. Wherever that net overclaims, B_net > u and a
    positive correction cannot come back down — base error is a hard bias,
    uncorrectable downward, unlike any loss term. Escape hatches: the
-   constant-shift certificate (learnings 9) — subtract two_arm's
-   sup(residual+)/rho for a certified base — or run the two_arm
+   constant shift (learnings 9) — subtract two_arm's
+   sup(residual+)/rho for a proven base — or run the two_arm
    subsolution program first. Until one lands, "positive correction" is a
-   strong prior, not a certificate.
+   strong prior, not a proof.
 2. The max has gradient jumps on its argmax seams; the true u has none
    (the seams are representation artifacts, not free boundaries). The
    smoothing fix — the Boltzmann softmax
@@ -998,7 +998,7 @@ THE FIRST TRAINED THREE-ARM NET TO BEAT THE DROP-ONE HEURISTIC, at 4.8 sigma
 and replicated in both blocks -- section 17 named that the real baseline and
 recorded the old champion FAILING it (+571, CI covering zero). Against the
 champion it is 2.2 sigma, favourable in both blocks: suggestive, not
-established, and promoted on the certificate with the arena as corroboration.
+established, and promoted on the bound numbers with the arena as corroboration.
 
 LEARNING RATES: only the first descends. 1e-4 over 122k gave 45x and fell
 throughout; 3e-5 (17%), 1e-5 (19%) and 3e-6 (10%) each stepped down at the cut
@@ -1006,7 +1006,7 @@ and then sat flat for their whole stretch. A cut that buys a step and no
 descent is shrinking the Adam wander radius around a fixed point, which is the
 topology's floor and not the schedule's.
 
-### The uniform-shift certificate LOSES to the free one (2026-08-16)
+### The uniform-shift bound LOSES to the free one (2026-08-16)
 
 Section 17's `B = max(0, p_ab, p_ac, m_b + p_bc)` is a PROVABLE subsolution --
 each drop is an admissible policy -- and costs no training. The trained net is
@@ -1014,10 +1014,10 @@ one only after subtracting its worst overclaim (learnings section 9). Measured
 on 32,768 wedge states:
 
     mean premium      trained 0.4706   drop-one B 0.4307
-    mean CERTIFIED    trained 0.4235   drop-one B 0.4307
+    mean PROVEN       trained 0.4235   drop-one B 0.4307
     trained >= B before the shift: 99.15%;  after: 60.2%
 
-So the trained bound is better everywhere until it is certified, and then it
+So the trained bound is better everywhere until it is made rigorous, and then it
 is worse: on states where B is alive the shifted net is a median 0.60x of B
 and worse on 88.9%. The whole difference is the tail. Priced at q99.9
 (shift 6.4e-3) instead of the sup, the trained bound wins by 7.8%, and the sup
@@ -1029,7 +1029,7 @@ NOT a sampler artifact, which was the first suspicion given the un-ported
 fence below. The worst states have their smallest Schur marginal at 5.9e-3 --
 above `PRIOR_FLOOR`, merely 20x below the cloud median -- and the sub-floor
 states the fence would remove are 0.98% of the cloud carrying 0.02% of the
-positive residual. The fence would not move the certificate. That also
+positive residual. The fence would not move the bound. That also
 re-prices the fence itself: it was measured against a SQUARED residual, where
 those states carried 99.996% of the loss; the linear violation term de-weights
 them by four orders on its own.

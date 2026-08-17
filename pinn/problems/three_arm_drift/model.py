@@ -365,7 +365,7 @@ class DimensionlessValueFunction(nn.Module):
         H(b, c) = b (m_b + l_ab) + c (m_c + l_ac) - l_ab b^2 - l_ac c^2
         + (l_bc - l_ab - l_ac) b c, handed to plain calculus in
         triangle-quadratic coefficients. Everything is graph-connected to the
-        premium's parameters, so pde_loss grades the gap and policy reads the
+        premium's parameters, so subsolution_loss grades the gap and policy reads the
         argmax off the same derivation.
 
         Drift adds one thing, on the LEFT: what the wandering erodes from the
@@ -625,10 +625,16 @@ if __name__ == "__main__":
     # THE graft: a three_arm checkpoint is one feature narrower, and at
     # etahat = 0 the extra feature is exactly 0 and the cap collapses onto
     # three_arm's. Close, NOT bitwise, since the softplus gate (2026-08-14):
-    # the source's relu gate and this class's soft one differ by at most
-    # (log2/k)^2 ~ 5e-3 of the envelope at the seam, decaying e^(-2k|r|)
-    # away from it. The feature/cap/stitch chain is still pinned exactly by
-    # the feature_scale identity below.
+    # the source's relu gate and this class's soft one differ near the seam
+    # and the difference decays e^(-2k|r|) away from it.
+    #
+    # 1.0e-2 is MEASURED, not derived. The seam estimate (log2/k)^2 ~ 5e-3
+    # justified a tolerance of 6e-3, and the true max is 7.17e-3 -- stable to
+    # three digits across independent random inits, so the check was failing
+    # DETERMINISTICALLY rather than flaking, and had been since the gate
+    # landed. The derivation is loose by ~1.4x (the max is not attained at
+    # the seam); the invariant it guards -- graft is close, and the
+    # feature/cap/stitch chain below is exact -- is unaffected.
     three_arm = ThreeArm([32, 16])
     grafted = ExplorationPremium([32, 16])
     grafted.stitch(three_arm.state_dict())
@@ -642,7 +648,7 @@ if __name__ == "__main__":
         - three_arm(draw.m_b, draw.m_c, draw.tau_bb, draw.tau_bc, draw.tau_cc)
     ).abs()
 
-    assert (graft_gap <= 6e-3 * graft_cap + 1e-7).all(), (
+    assert (graft_gap <= 1.0e-2 * graft_cap + 1e-7).all(), (
         (graft_gap / graft_cap.clamp_min(1e-9)).max().item()
     )
     assert torch.equal(grafted.feature_scale[:-1], three_arm.feature_scale)

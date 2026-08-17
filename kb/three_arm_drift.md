@@ -537,9 +537,122 @@ OPEN:
     on. Worth its own plan, after the two-arm drift arena has actually been
     run — that payoff is still unmeasured.
 
+## 11. The subsolution objective, cold-started (PROMOTED 2026-08-17)
+
+three_arm's objective (kb/three_arm.md section 18) carried here, trained FROM
+SCRATCH on a fresh 128:128:128 rather than from any existing net, in the
+`three_arm_drift_v2` clone, built, measured and PROMOTED; the clone is
+deleted and the two-sided residual it replaced survives only in this
+record. THE PROMOTED NET IS THE SYMMETRIC STAGE, not the best-bounded one
+-- read the last subsection before proposing more annealing, and before
+proposing any residual-side attack on the policy.
+
+### SLACK_PRICE: the asymmetry is a schedule, not a constant
+
+The objective as promoted elsewhere prices only OVERSHOOT (`v > max H`), which
+makes slack free -- and there are two ways to exploit that, both measured:
+
+- On two_arm FROM SCRATCH (38.6k iterations, shipped CLI, the champion for
+  reference): the premium settles at 1547 against 2476, a feasible solution
+  37% BELOW V*, while the learning number inflates to 48.8 against 5.44. The
+  climb term is a global MEAN, so it cannot say WHERE to climb; the net climbs
+  where that is cheap and sags where it is not.
+- On this problem the same freedom inflates `max H` instead: slack reached
+  1.02 against the champion's 0.026 while the premium held, i.e. the ceiling
+  ran away rather than the value collapsing.
+
+Both are cured by pricing slack, as a convex combination so the two sides sum
+to 1 and the residual term's magnitude does not move when the price does (the
+auxiliary weights are calibrated against it):
+
+    residual = (1 - SLACK_PRICE) * mean(relu(r)) + SLACK_PRICE * mean(relu(-r))
+
+the pinball loss at `q = 1 - SLACK_PRICE`. 0 is the promoted objective, 0.5 is
+the symmetric two-sided loss in L1, above 0.5 prefers supersolutions. On
+two_arm from scratch, 0.02 fixed both failures at once: premium 2487 against
+the champion's 2479, learning number 5.18 against 5.44.
+
+SYMMETRIC FINDS THE FUNCTION, ASYMMETRIC TIGHTENS THE BOUND, AND ONE PRICE CANNOT DO
+BOTH. The anneal ladder on this problem, each stage run to its own floor:
+
+    price   overshoot   premium   note
+    -       3.80e-2     1.4910    the two-sided champion, for reference
+    0.5     ~2.4e-2     1.5069    symmetric; finds the function
+    0.1      5.54e-3    1.4804
+    0.02     2.12e-3    1.4572    UNSTABLE at lr 1e-4, stable at 1e-5
+    0.005    1.4e-3     1.4313    floored immediately, bought 10%
+
+Each step down buys 2.6-4x on overshoot and costs ~1% of premium. The 0.02
+stage is the rule: attempted at lr 1e-4 it drove the violation UP 14% and
+sagged the premium, and the identical price from the same net at lr 1e-5
+descended cleanly. ANNEAL THE PRICE ONLY AS FAST AS THE STEP SIZE ALLOWS.
+
+CLIMB_WEIGHT is 0 here and the 10x-dead-solution-floor rule that set it at
+2.4e-1 is WRONG on a problem whose violation is two orders above three_arm's:
+the rule is a ratio against `violation / climb`, which is large precisely when
+the net is BAD, so the worse the problem the more it over-weights the climb.
+Measured on the cold start, the climb term came to 1.08 against a violation of
+0.18 -- the objective was 85% "maximize u" and the premium ran to 3x the
+champion's. The ties are the degeneracy breaker, as they were for years.
+
+### What it bought, and what it did not
+
+Trained from nothing: three lr stages on a smooth trunk, a 16-unit kink graft
+(bitwise at step 0, bought a one-time 5%), then the anneal above. Against the
+champion, 8192-state medians over 5 draws:
+
+    net            overshoot   slack      over%   premium   sup     non-concave
+    champion       3.80e-2     2.56e-2    69.2%   1.4910    4.96    8.6e-2
+    v2 annealed    2.12e-3     9.53e-2    24.7%   1.4572    2.95    1.3e-3
+
+18x on overshoot, 68x on concavity, 41% on the sup -- and the ARENA, 3,000
+paired reps at production parameters in the deployment drift world:
+
+    Thompson     31,882   evidence 1101   commit   0.0%
+    v2 (kinked)  48,686   evidence  275   commit 100.0%
+    champion     78,714   evidence   76   commit 100.0%
+
+    v2 - champion   -30,028 +/- 4,569
+    v2 - Thompson   +16,804 +/- 3,178
+
+That is the promotion: 38% better than its predecessor at 13 sigma, on a net
+trained from nothing. BOTH LOSE TO THOMPSON --
+this one by 1.5x, the champion by 2.5x. Every three-arm-drift net ever trained
+commits on 100% of reps, most of them having bought ~70 units of evidence
+against Thompson's 1,100. That is commit-on-no-evidence at the flat prior, and
+it is untouched by an order of magnitude of residual improvement.
+
+### The bound and the policy are INVERTED here
+
+Ranked by arena regret against ranked by overshoot, the two orders disagree:
+
+    net                  overshoot   regret
+    v2 symmetric         ~2.4e-2     48,686   <- loosest bound, best policy
+    v2 price 0.005        1.4e-3     60,442
+    champion              3.80e-2    78,714
+    v2 price 0.1          5.54e-3   164,776   <- tight bound, catastrophic
+
+Not merely uncorrelated: the tightest-bounded nets are among the worst policies,
+and the stage with no asymmetry at all is the best. Learnings section 9 already
+says the residual is not the referee; this is the first case where the two
+point in OPPOSITE directions. It is why the SYMMETRIC stage was promoted
+over the better-bounded ones, why `SLACK_PRICE` ships at 0.5 here against 0
+in the other three problems, and why the annealed net is kept beside the
+champion as `.annealed.pt` rather than as the champion.
+
+The policy hangs on the argmax of a quadratic in the learning numbers, and the
+residual sees those only through `alpha(1-alpha) <= 1/4`. Concavity is graded
+and is excellent (1.3e-3), so the Hessian is not the problem: what commits the
+policy is the behaviour at the FLAT PRIOR, in the low-precision corner that
+carries 48% of the residual (states with `tau_bb < 1e-2`, 10.8% of the cloud,
+mean |r| 24x the well-informed region; high drift carries 82% on 45% of
+states, and the sampler's ceiling `2 etahat tau <= 1` makes the two coincide).
+Fixing THAT is the open problem, and it is a policy problem, not a residual
+one.
+
 ## To come
 
-Nothing mathematical is missing for an implementation. The order that follows
-`two_arm_drift`'s: envelope module first with its self-checks, then the
-sampler, then thread `etahat` through model and loss, then graft the three_arm
-champion and confirm step zero is bit-exact.
+- The commit-on-no-evidence behaviour above. A residual-side attack has now
+  been tried at scale and did not move it.
+- `pinn/arena/three_arm_drift.py` exists as of 2026-08-17 and is the referee
+  for any of it.

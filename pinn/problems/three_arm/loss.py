@@ -6,7 +6,7 @@ second problem (kb/two_arm_drift.md section 10); read those first.
 
 V* is the MAXIMAL subsolution of the HJB, so `maximize u subject to
 v <= max H` has the true value function as its optimum and every feasible
-point is a certified lower bound. Three notes specific to N = 3:
+point is a proven lower bound. Three notes specific to N = 3:
 
 - The climb needs NO units factor. Both two-arm problems grade a similarity
   chart and have to divide `tauhat**1.5` back out of the residual, which the
@@ -50,11 +50,25 @@ TIE_WEIGHT = 10.0
 # objective alone. 10x above that floor.
 #
 # NOT calibrated on a short sweep. two_arm_drift found five decades
-# indistinguishable at 3k iterations and a monotone certificate collapse by
+# indistinguishable at 3k iterations and a monotone collapse of the bound by
 # 50k at the cheapest of them (kb/two_arm_drift.md section 10). Judge this over
 # 100k+ on block medians: violation RISING with a flat climb means too high,
 # climb SAGGING below the champion's 0.466 means too low.
 CLIMB_WEIGHT = 4.0e-2
+
+# What one unit of SLACK costs, as a share of the residual budget: the two
+# sides are priced (1 - SLACK_PRICE) and SLACK_PRICE, so they always sum to 1
+# and moving this reallocates between them WITHOUT rescaling the objective,
+# which keeps every weight calibrated against the residual valid across a
+# sweep. The pinball loss at q = 1 - SLACK_PRICE: 0 is the pure subsolution
+# objective, 0.5 the symmetric two-sided loss in L1, above 0.5 the wrong side
+# for a lower bound.
+#
+# The climb is a global MEAN and cannot say WHERE to climb, so at 0 a
+# from-scratch net sags below V* and inflates the learning number to buy free
+# slack -- measured on two_arm, whose loss carries the table. 0 is the default
+# because this problem's champion was polished at 0; 0.02 is for COLD STARTS.
+SLACK_PRICE = 0.0
 
 # Concavity: L[f] >= 0 for every contrast direction, provable at the answer and
 # invisible to the residual, so it moves the path and not the fixed point. Zero
@@ -64,6 +78,36 @@ CLIMB_WEIGHT = 4.0e-2
 # seven draws, since a single draw put it at 730% of the equation.
 CONCAVITY_SCALE = 1.0e-3
 CONCAVITY_WEIGHT = 2.6e0
+
+# EXCHANGEABILITY. At a state fixed by the whole relabelling group the three
+# learning numbers must be EQUAL -- the arms are interchangeable, so no pair
+# can be worth more to learn about than another. The residual cannot see this
+# (it reads the numbers only through the maximization), the tie losses only
+# reach it as a limit from the walls, and the trained net misses it badly
+# exactly where it matters: 58% spread at the precision floor against 6.5% at
+# I ~ 1, and the arena boots EVERY run at a state of this family.
+#
+# What it costs is not the value but the POLICY, because the maximizer of a
+# near-flat quadratic is badly conditioned: a 58% spread in the coefficients
+# came out as 0.446/0.376/0.178 where exchangeability demands exact thirds,
+# and on three_arm_drift a 240% spread flips a sign and starves an arm on zero
+# evidence. Zero at the answer, so it moves the path and not the fixed point.
+#
+# RELATIVE, and the denominator is DETACHED. Relative because the policy reads
+# the spread against the magnitude, which ranges over four decades here (L ~
+# 400 at the floor, 0.6 at I ~ 1) and would otherwise be graded almost
+# entirely at the bottom; detached because a live denominator is minimized by
+# INFLATING the learning numbers, which is the failure two_arm already paid
+# for once (kb/two_arm.md section 10).
+# CALIBRATED ON GRADIENT SHARE, NOT VALUE SHARE, and the two disagree by three
+# orders here: on the champion the term's VALUE is 1.09e-1 against a violation
+# of 1.78e-5 (6,000x) while its GRADIENT is 5.79 against 8.0e-2 (72x), so the
+# house 1-10%-of-the-anchor rule would set 1e-5 and a gradient rule sets 1e-3.
+# Value share is a proxy for gradient share and the proxy breaks when a term
+# starts far from satisfied rather than dormant: concavity reads exactly 0 on
+# this net and is a guard, this one has real work to do. 1e-3 puts the
+# symmetry gradient at 7% of the violation's.
+SYMMETRY_WEIGHT = 1.0e-3
 
 
 def directional_learning(
@@ -97,7 +141,7 @@ def subsolution_loss(
     value form (doc sections 4, 7, 10), units rho = sigma = 1:
     v = max over the simplex of alpha.m + pairwise learning terms, graded in
     the equation's OWN units, never scaled. v > max H is the overclaim that
-    breaks the certificate; v < max H is merely a slack subsolution and is left
+    breaks the bound; v < max H is merely a slack subsolution and is left
     free, since the climb is what tightens it. LINEAR, because an L1 penalty is
     EXACT at a finite weight where a quadratic only approaches feasibility.
 
@@ -137,12 +181,31 @@ def subsolution_loss(
     # mode loud at low information. Gone: a chart-derived weight on the
     # residual is an undeclared reweighting of the domain (learnings section
     # 3).
-    violation = torch.relu(v - best.value).mean()
+    residual = v - best.value
+    violation = (1.0 - SLACK_PRICE) * torch.relu(residual).mean()
+
+    if SLACK_PRICE > 0.0:
+        violation = violation + SLACK_PRICE * torch.relu(-residual).mean()
     climb = value.premium(
         draw.m_b, draw.m_c, draw.tau_bb, draw.tau_bc, draw.tau_cc
     ).mean()
 
     return violation, climb, concavity
+
+
+def symmetry_loss(value: DimensionlessValueFunction, draw: RidgeSample) -> Tensor:
+    """
+    Relative spread of the three learning numbers on exchangeable states,
+    where the symmetry forces them equal.
+    """
+    zero = torch.zeros_like(draw.mean)
+    _, _, learning = value.hamiltonian(
+        zero, zero, draw.tau_bb, draw.tau_bc, draw.tau_cc
+    )
+    mean = (learning[0] + learning[1] + learning[2]) / 3.0
+    scale = mean.detach().abs().clamp_min(1e-12)
+
+    return sum(((l - mean.detach()) / scale).pow(2) for l in learning).mean()
 
 
 def control_tie_loss(value: DimensionlessValueFunction, draw: RidgeSample) -> Tensor:
@@ -222,11 +285,13 @@ def loss(
     draw: Sample,
     control_draw: RidgeSample,
     treatment_draw: RidgeSample,
+    symmetry_draw: RidgeSample,
     iteration: int | None = None,
 ) -> Tensor:
     violation, climb, concavity = subsolution_loss(value, draw)
     control_residual = control_tie_loss(value, control_draw)
     treatment_residual = treatment_tie_loss(value, treatment_draw)
+    symmetry = symmetry_loss(value, symmetry_draw)
 
     if iteration is not None:
         print(
@@ -235,12 +300,14 @@ def loss(
             f"  control_tie {control_residual.item():.3e}"
             f"  treatment_tie {treatment_residual.item():.3e}"
             f"  concavity {concavity.item():.3e}"
+            f"  symmetry {symmetry.item():.3e}"
         )
 
     return (
         violation
         + TIE_WEIGHT * (control_residual + treatment_residual)
         + CONCAVITY_WEIGHT * concavity
+        + SYMMETRY_WEIGHT * symmetry
         - CLIMB_WEIGHT * climb
     )
 
@@ -267,6 +334,7 @@ def draw(batch: int, device: str = "cpu") -> tuple:
         on_device(Sample.draw(batch).fold(), device),
         on_device(RidgeSample.control_tie(batch // 4), device),
         on_device(RidgeSample.treatment_tie(batch // 4), device),
+        on_device(RidgeSample.exchangeable(batch // 4), device),
     )
 
 
@@ -396,6 +464,7 @@ if __name__ == "__main__":
         Sample.draw(512),
         RidgeSample.control_tie(128),
         RidgeSample.treatment_tie(128),
+        RidgeSample.exchangeable(128),
     )
     tiny_loss.backward()
     gradients = [p.grad for p in tiny.parameters()]
@@ -414,6 +483,29 @@ if __name__ == "__main__":
             return (tbb * tcc - tbc**2).tanh()
 
     invariant = DimensionlessValueFunction(_InvariantPremium())
+
+    # The symmetry term on an S3-INVARIANT premium: det T is invariant, so its
+    # three learning numbers must agree at exchangeable states and the term
+    # must read machine zero. This is the only check that pins the sign
+    # convention of the pair-to-learning-number correspondence -- get it wrong
+    # and an invariant premium scores nonzero.
+    invariant_symmetry = symmetry_loss(
+        DimensionlessValueFunction(_InvariantPremium()), RidgeSample.exchangeable(256)
+    )
+
+    assert invariant_symmetry.item() < 1e-10, invariant_symmetry.item()
+
+    # And the sampler really is fixed by the group: equal pairwise precisions,
+    # zero contrasts. Written in pair coordinates, where a relabel permutes.
+    fixed = RidgeSample.exchangeable(64)
+    pairs = torch.stack(
+        [fixed.tau_bb + fixed.tau_bc, fixed.tau_cc + fixed.tau_bc, -fixed.tau_bc],
+        dim=-1,
+    )
+
+    assert (fixed.mean == 0.0).all()
+    assert (pairs.max(dim=-1).values - pairs.min(dim=-1).values).abs().max() < 1e-12
+
     batch = Sample.draw(2048)
     swapped = Sample(  # b <-> c relabel
         batch.m_c, batch.m_b, batch.tau_cc, batch.tau_bc, batch.tau_bb

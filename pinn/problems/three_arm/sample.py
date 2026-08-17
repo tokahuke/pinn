@@ -147,6 +147,46 @@ class RidgeSample:
         return cls(m_c, tau_bb, tau_bc, tau_cc)
 
     @classmethod
+    def exchangeable(cls, n: int) -> RidgeSample:
+        """
+        States FIXED by the whole relabelling group: all three means equal
+        (so all contrasts 0, carried in `mean`) and all three pairwise
+        precisions equal, which is `T = I [[2, -1], [-1, 2]]`.
+
+        Built exactly rather than drawn, because the interior law cannot
+        produce them: `PRIOR_FLOOR` is added to tau_bb and tau_cc, i.e. to the
+        two pairs containing the control, and not to tau_bc -- so its states
+        are always a little lopsided in the pairs. Here the floor goes on the
+        common precision instead, where it cannot break the symmetry.
+
+        One free coordinate, the common precision, on the interior law's own
+        decade-spread scale: the asymmetry these states measure is worst at
+        the bottom of it (58% at the floor against 6.5% at I ~ 1), and the
+        arena boots every run at exactly such a state.
+        """
+        t = _SOBOL_WALL.draw(n).clamp(1e-7, 1.0 - 1.0e-7)
+        # HALF the floored diagonal, not a floored pair coordinate: the
+        # interior law floors tau_bb, so `T = I [[2,-1],[-1,2]]` reaches
+        # tau_bb = PRIOR_FLOOR only at I = PRIOR_FLOOR / 2. Flooring I itself
+        # put the whole family at tau_bb >= 2 PRIOR_FLOOR and MISSED THE STATE
+        # THE ARENA BOOTS AT, which is exactly tau_bb = PRIOR_FLOOR; the first
+        # version of this sampler did that and fixed the middle decades while
+        # leaving the floor decade's 58% spread untouched.
+        precision = 0.5 * (
+            PRIOR_FLOOR
+            + PRECISION_MEAN
+            * decade_scale(t[:, 0], SCALE_DECADES)
+            * chi_squared_1(t[:, 1])
+        )
+
+        return cls(
+            torch.zeros_like(precision),
+            2.0 * precision,
+            -precision,
+            2.0 * precision,
+        )
+
+    @classmethod
     def treatment_tie(cls, n: int) -> RidgeSample:
         """
         Wall states on the treatment tie {m_b = m_c}: the free mean is the

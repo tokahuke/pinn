@@ -6,7 +6,7 @@ Layout: sample.py (long-tailed collocation and ridge draws), simplex.py
 the proven free-information envelope and the value wrapper), loss.py (the
 subsolution objective: climb subject to v <= max H, plus BC1).
 
-The champion is a certified lower bound rather than a two-sided fit: it
+The champion is a proven lower bound rather than a two-sided fit: it
 overclaims on 0.60% of the cloud against its predecessor's 23.7%, at no
 measurable regret (kb/two_arm.md section 10).
 """

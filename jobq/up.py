@@ -1,6 +1,4 @@
-"""
-`jobq up`: a RunPod pod with the repo on it, ready to train.
-"""
+"""`jobq up`: a RunPod pod with the repo on it, ready to train."""
 
 from __future__ import annotations
 
@@ -11,40 +9,12 @@ from importlib.resources import files
 from .daemon import Daemon
 from .pod import KEY, Pod, runpodctl
 
-# Ships a working CUDA torch on python 3.12; setup.sh inherits both through
-# a --system-site-packages venv rather than reinstalling 2.5GB of torch.
 IMAGE = "runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404"
+"""
+Ships a working CUDA torch on python 3.12; setup.sh inherits both through a
+--system-site-packages venv rather than reinstalling 2.5GB of torch.
+"""
 
-# Tried in order: stock moves hour to hour and a create against a sold-out
-# type just errors, so the first with capacity wins.
-#
-# Ordered by MEASURED work per dollar, not by price. The step is
-# dispatch-bound, which made "the cheapest card is as good as the dearest"
-# look obvious -- and it is wrong. Same benchmark (three_arm, graphed, batch
-# 16384, idle card), 2026-08-12:
-#
-#     RTX 4090    14.5 ms/step   $0.34 community / $0.74 secure
-#     RTX A6000   46.7 ms/step   $0.33 community / $0.53 secure
-#
-# 3.2x faster for the same community price -- about 5x the work per dollar
-# against the A6000 on secure. Clock explains only part of it (3105 MHz
-# against 2100); Ada's scheduler does the rest on small kernels. L4 and A40
-# are UNMEASURED fallbacks, listed only so a create still lands when the
-# first two are dry.
-# Work per dollar on the same benchmark, community prices 2026-08-15:
-#
-#     RTX 4000 Ada  20.5 ms/step   $0.20   1.00 (reference)
-#     RTX 4090      14.5 ms/step   $0.34   0.83
-#     RTX A6000     46.7 ms/step   $0.33   0.27
-#
-# The small Ada card WINS despite being 1.41x slower, because the step is
-# dispatch-bound: SM count barely matters, scheduler generation and clock do
-# the work, and this card carries the SAME 3105 MHz max SM clock as the 4090
-# on a third of the silicon. That is why Ampere (A6000, A5000, 3090) stays
-# last however cheap it looks. The remaining Ada/Blackwell entries are
-# UNMEASURED, listed by price so a create still lands when the first two are
-# dry -- the catalog lists types, not stock, and four candidates was too thin
-# a walk (all four dry, 2026-08-15).
 GPUS = (
     "NVIDIA RTX 4000 Ada Generation",  # $0.20, measured 20.5 ms/step
     "NVIDIA GeForce RTX 4090",  # $0.34, measured 14.5 ms/step
@@ -56,6 +26,12 @@ GPUS = (
     "NVIDIA A40",
     "NVIDIA L4",
 )
+"""
+Tried in order, first with capacity winning, since stock moves hour to hour and a
+create against a sold-out type errors. Ordered by *measured* work per dollar rather
+than price, which is why Ampere is last and the unmeasured entries trail: kb/jobq.md,
+"Card choice is work per dollar".
+"""
 
 
 @click.command()
@@ -86,17 +62,17 @@ def up(
     name: str, gpu: str | None, image: str, disk: int, cloud: str, idle: int
 ) -> None:
     """
-    Create a pod, push the repo, install what it imports.
-
-    Idempotent: run it again and it prints the existing pod's ssh line. The
-    pod is billed while it exists, so `jobq down` when finished.
+    Create a pod, push the repo, install what it imports. Idempotent: run it again and
+    it prints the existing pod's ssh line. The pod is billed while it exists, so
+    `jobq down` when finished.
     """
-    if not KEY.exists():
+    if KEY.exists() is False:
         raise click.ClickException(f"no ssh key at {KEY}")
 
     keys = runpodctl("ssh", "list-keys", timeout=120)
+    listed = keys.get("keys") if isinstance(keys, dict) else keys
 
-    if not (keys.get("keys") if isinstance(keys, dict) else keys):
+    if listed is None or len(listed) == 0:
         raise click.ClickException(
             "no ssh key on the runpod account; add one with "
             f"`runpodctl ssh add-key --key-file {KEY}.pub`"
@@ -105,7 +81,7 @@ def up(
     pod = Pod.find(name, resolve=False)
 
     if pod is None:
-        for candidate in [gpu] if gpu else GPUS:
+        for candidate in [gpu] if gpu is not None else GPUS:
             click.echo(f"trying {candidate}...")
 
             try:
@@ -120,14 +96,13 @@ def up(
                     candidate,
                     "--cloud-type",
                     cloud,
-                    # Community hosts only publish an ssh port when they have
-                    # a public ip, and without this the create waits for a
-                    # mapping that never appears. Harmless on secure.
+                    # Community hosts only publish an ssh port when they have a
+                    # public ip, and without this the create waits for a mapping that
+                    # never appears. Harmless on secure.
                     *(["--public-ip"] if cloud == "COMMUNITY" else []),
                     "--container-disk-in-gb",
                     str(disk),
-                    # Declared at CREATE: adding 22/tcp later restarts the
-                    # container.
+                    # Declared at create time: adding 22/tcp later restarts it.
                     "--ports",
                     "22/tcp",
                     "--ssh",
@@ -143,9 +118,9 @@ def up(
                 "or --cloud SECURE"
             )
     else:
-        # `up` means "make a working pod exist", so a stopped one is adopted
-        # rather than refused. Nothing else starts a pod: run, cp and backup
-        # all assume RUNNING and say so.
+        # `up` means "make a working pod exist", so a stopped one is adopted rather
+        # than refused. Nothing else starts a pod: run, cp and backup all assume
+        # RUNNING and say so.
         state = runpodctl("pod", "get", pod.id, timeout=120)
         status = state.get("desiredStatus") if isinstance(state, dict) else None
 
@@ -176,7 +151,7 @@ def up(
     click.echo(
         f"  backup daemon pid {pid}"
         if pid is not None
-        else "  BACKUP DAEMON FAILED TO START -- nothing is backing this pod up"
+        else "  BACKUP DAEMON FAILED TO START: nothing is backing this pod up"
     )
     click.echo(f"\nready:  ssh {' '.join(pod.flags)} {pod.host}")
     click.echo("        jobq run pinn train --problem ... --device cuda")

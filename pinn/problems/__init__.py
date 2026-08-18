@@ -1,13 +1,14 @@
 """
-One module per problem; each exports its models and an objective() for the
-generic trainer.
+One package per problem, each answering `Problem`.
+
+Importing this package is what makes the four problems exist: a subclass
+registers itself as it is defined, and `Problem.named` resolves from there.
 """
 
-# The registry the CLI offers. Adding a problem means adding it here and
-# exposing init_model() and objective() from its package.
-PROBLEMS = [
-    "two_arm",
-    "two_arm_drift",
-    "three_arm",
-    "three_arm_drift",
-]
+from .problem import Problem
+from .three_arm import ThreeArm
+from .three_arm_drift import ThreeArmDrift
+from .two_arm import TwoArm
+from .two_arm_drift import TwoArmDrift
+
+__all__ = ["Problem", "ThreeArm", "ThreeArmDrift", "TwoArm", "TwoArmDrift"]

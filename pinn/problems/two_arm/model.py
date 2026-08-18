@@ -12,62 +12,31 @@ from pathlib import Path
 from torch import Tensor
 from typing import Self
 
-from ...net import DeclaresTopology, GainedTanh, parse_topology
-from ...net import read_features, read_topology
+from ...net import (
+    DeclaresTopology,
+    DimensionlessValue,
+    GainedTanh,
+    parse_topology,
+    read_features,
+    read_topology,
+)
 from ...utils import nu
 from .sample import PRIOR_FLOOR, sample_sobol
 from .simplex import Maximum, maximize_quadratic
 
-# Width of the feature stack in ExplorationPremium.forward.
 FEATURE_COUNT = 4
+"""Width of the feature stack in `ExplorationPremium.forward`."""
 
 
 class ExplorationPremium(DeclaresTopology):
     """
-    Dense GainedTanh MLP times the free-information envelope:
+    Dense GainedTanh MLP times the free-information envelope, `y = relu(response)**2`:
 
-        u = exp(log_scale) * nu(-muhat, tauhat**(-1/2)) * y / (1 + y),
-        y = relu(response)**2
+        u = exp(log_scale) * nu(-muhat, tauhat**(-1/2)) * y / (1 + y)
 
-    nu(-muhat, sd) is the proven upper bound on the premium (kb/three_arm.md
-    section 13, specialized to one challenger); the original tauhat**(-1/2)
-    envelope is exactly its ridge slice, nu(0, sd) = sd / sqrt(2 pi), so this
-    upgrade adds the muhat decay the old envelope lacked. The response head is
-    linear and y/(1+y) maps it into [0, 1), so 0 <= u < envelope holds by
-    construction; log_scale init 0 makes the envelope the proven bound
-    itself. Rational saturation, NOT tanh(y): tanh is float32-exactly 1
-    beyond r ~ 2.5 and its gradient underflows, a cliff with no way back
-    (three_arm's first start died there); y/(1+y) saturates with a
-    polynomial tail, so gradients survive any overshoot.
-
-    The squared relu is the free-boundary trick: in the commit region the true
-    premium is exactly 0 (v = muhat solves the HJB there), and at the boundary
-    the solution pastes smoothly, u = u_m = 0 with a jump only in u_mm (the
-    curvature law). relu(r)**2 has exactly that regularity on the learned zero
-    set of r: the commit region is solved exactly, and the curvature kink a
-    smooth response had to fake is built in. A plain clip was rejected: it
-    kinks the FIRST derivative, breaking smooth pasting.
-
-    Feature choices: log tauhat gives every decade of precision equal
-    resolution; muhat sqrt(tauhat) is the posterior z-score (the corridor is a
-    near-vertical band in it); muhat tauhat is the tail similarity coordinate
-    (the far-field free boundary is its level set ~ 1/2). Kinky structures
-    become near axis-aligned in feature space, so the net buys them cheaply.
-
-    Fourier features on z were tried (4 sin/cos harmonics, 2026-08-04) and
-    REVERTED: the sinusoids imprinted their level sets on the residual, doubled
-    the exterior ripple, and even L-BFGS could not make the basis pay.
-
-    -muhat, NOT -|muhat|: on the muhat >= 0 domain they are the same bound,
-    but the abs would put a kink at exactly muhat = 0, where the ridge loss
-    differentiates -- autograd's sign(0) = 0 would silently drop the
-    envelope's one-sided slope and train BC1 against a derivative the
-    muhat > 0 side never sees. nu is smooth in its mean, so the smooth form
-    keeps the ridge trap honored: the premium stays smooth at the ridge.
-
-    Only trained on muhat >= 0; the true premium is even, so evaluate at
-    |muhat| yourself if you must go left. Output at muhat < 0 is garbage
-    (and the envelope grows there instead of decaying).
+    `0 <= u < envelope` is architectural and `log_scale = 0` starts at the proven
+    bound. Why each factor has its shape: kb/two_arm.md section 11. Trained on
+    `muhat >= 0` only; the premium is even, so evaluate at `|muhat|` to go left.
     """
 
     def __init__(self, hidden: list[int]) -> None:
@@ -79,8 +48,8 @@ class ExplorationPremium(DeclaresTopology):
         for i in range(len(sizes) - 1):
             linear = nn.Linear(sizes[i], sizes[i + 1])
 
-            # Xavier with the tanh gain (PyTorch's default is relu-flavored and
-            # ~4x too small for tanh here); plain gain for the linear head.
+            # Xavier with the tanh gain, since PyTorch's default is relu-flavored and
+            # ~4x too small for tanh here. Plain gain for the linear head.
             head = i == len(sizes) - 2
             nn.init.xavier_uniform_(
                 linear.weight, gain=1.0 if head else nn.init.calculate_gain("tanh")
@@ -96,11 +65,9 @@ class ExplorationPremium(DeclaresTopology):
         self.net = nn.Sequential(*layers[:-1])
         self.log_scale = nn.Parameter(torch.zeros(()))
 
-        # Xavier assumes unit-variance inputs; the raw feature stack breaks
-        # that under the general sampling law, railing first-layer tanh units
-        # (see three_arm's model for the measurement). Calibrate a fixed
-        # per-feature scale from the law once at init; a buffer, so
-        # checkpoints carry it.
+        # Xavier assumes unit-variance inputs and the raw feature stack breaks that,
+        # so calibrate a scale from the law once at init, as a buffer so checkpoints
+        # carry it (kb/two_arm.md section 11).
         self.register_buffer("feature_scale", torch.ones(FEATURE_COUNT))
 
         muhat, tauhat = sample_sobol(4096)
@@ -110,18 +77,15 @@ class ExplorationPremium(DeclaresTopology):
         super()._load_from_state_dict(state_dict, prefix, *rest)
 
     def _features(self, muhat: Tensor, tauhat: Tensor) -> Tensor:
-        """
-        The raw (uncalibrated) feature stack.
-        """
+        """The raw (uncalibrated) feature stack."""
         return torch.stack(
             [muhat, tauhat.log(), muhat * tauhat.sqrt(), muhat * tauhat], dim=-1
         )
 
     def forward(self, muhat: Tensor, tauhat: Tensor) -> Tensor:
-        # Sub-floor states get the floor's shape continued self-similarly:
-        # response at the z-preserving floor state, envelope at the true one
-        # (kb/two_arm.md section 9, which also holds the four constructed
-        # targets this replaced). Binds only off the sampling law.
+        # Sub-floor states get the floor's shape continued self-similarly: response at
+        # the z-preserving floor state, envelope at the true one (kb/two_arm.md
+        # section 9). Binds only off the sampling law.
         tau_eff = tauhat.clamp_min(PRIOR_FLOOR)
         response = self.net(
             self._features(muhat * (tauhat / tau_eff).sqrt(), tau_eff)
@@ -135,7 +99,7 @@ class ExplorationPremium(DeclaresTopology):
         return nu(-muhat, tauhat.rsqrt()) * gated
 
 
-class DimensionlessValueFunction(nn.Module):
+class DimensionlessValueFunction(DimensionlessValue):
     """
     Dimensionless value on top of the premium: v = max(muhat, 0) + u.
 
@@ -152,8 +116,8 @@ class DimensionlessValueFunction(nn.Module):
     def load(cls, path: Path) -> Self:
         """
         A trained checkpoint as a model, at the architecture the checkpoint
-        DECLARES; older ones that declare nothing fall back to inferring the
-        widths from the premium net's weight shapes.
+        *declares*. A file that declares nothing raises a KeyError, which means it
+        predates the declaration and is a file to migrate.
         """
         state = torch.load(path)
         hidden, _ = read_topology(state)
@@ -162,6 +126,13 @@ class DimensionlessValueFunction(nn.Module):
 
         return value
 
+    def bind(self, rho: float, sigma: float) -> ValueFunction:
+        """
+        This net tied to one experiment, which is what makes it usable: means
+        and precisions go in and come back in your own units.
+        """
+        return ValueFunction(self, rho, sigma)
+
     def forward(self, muhat: Tensor, tauhat: Tensor) -> Tensor:
         return torch.relu(muhat) + self.premium(muhat, tauhat)
 
@@ -169,17 +140,9 @@ class DimensionlessValueFunction(nn.Module):
         self, muhat: Tensor, tauhat: Tensor
     ) -> tuple[Tensor, Maximum, Tensor]:
         """
-        The HJB's two sides on the similarity chart (z, s), where the operator
-
-            L_ab[g] = g_s + (1/2) g_zz + (z/2) g_z - (1/2) g
-
-        is O(1)-conditioned at every information level (kb/two_arm.md
-        section 8): the equation reads e^s (z + g) = max over alpha of
-        alpha e^s z + alpha(1-alpha) L_ab[g]. Returns the left side, the
-        maximization, and L_ab itself -- all graph-connected to the premium's
-        parameters, so pde_loss grades the gap AND the operator's sign, and
-        policy reads the argmax off the same derivation. muhat >= 0 only,
-        like forward.
+        The HJB's two sides on the similarity chart (z, s), O(1)-conditioned at every
+        information level (kb/two_arm.md section 8). Returns the left side, the
+        maximization and `L_ab`, graph-connected so policy reads the same argmax.
         """
         z = (muhat * tauhat.sqrt()).detach().requires_grad_(True)
         s = tauhat.log().detach().requires_grad_(True)
@@ -195,8 +158,8 @@ class DimensionlessValueFunction(nn.Module):
 
     def policy(self, muhat: Tensor, tauhat: Tensor) -> Tensor:
         """
-        The argmax allocation (treatment share). muhat >= 0 only, like
-        forward; ValueFunction.policy handles the arm swap.
+        The argmax allocation (treatment share). `muhat >= 0` only, like forward,
+        because `ValueFunction.policy` handles the arm swap.
         """
         _, best, _ = self.hamiltonian(muhat, tauhat)
 
@@ -207,11 +170,11 @@ class ValueFunction(nn.Module):
     """
     Deployment-facing value: real units in and out, either sign of the mean.
 
-    Wraps a trained DimensionlessValueFunction with the readout dictionary
-    (muhat = mu / (sigma sqrt(rho)), tauhat = rho sigma^2 tau,
-    V = (sigma / sqrt(rho)) vhat) and evaluates the premium at |muhat| -- the
-    true premium is even, and the net is only trained on muhat >= 0 (its
-    docstring's warning) -- while the commit term keeps the sign.
+    Wraps a trained `DimensionlessValueFunction` with the readout dictionary
+    (`muhat = mu / (sigma sqrt(rho))`, `tauhat = rho sigma^2 tau`,
+    `V = (sigma / sqrt(rho)) vhat`) and evaluates the premium at `|muhat|`, since the
+    true premium is even and the net is only trained on `muhat >= 0`. The commit term
+    keeps the sign.
     """
 
     def __init__(
@@ -232,8 +195,8 @@ class ValueFunction(nn.Module):
 
     def policy(self, mu: Tensor, tau: Tensor) -> Tensor:
         """
-        The argmax allocation (treatment share): the dimensionless policy
-        evaluated at |muhat| and reflected back by the arm swap.
+        The argmax allocation (treatment share): the dimensionless policy evaluated
+        at `|muhat|` and reflected back by the arm swap.
         """
         muhat = mu / (self.sigma * self.rho**0.5)
         tauhat = self.rho * self.sigma**2 * tau
@@ -246,12 +209,9 @@ def init_model(
     state: dict | None = None, topology: str | None = None
 ) -> DimensionlessValueFunction:
     """
-    A model to start training from: fresh at `topology`, or adapted from an
-    existing checkpoint's `state`. Exactly one of the two.
-
-    The CLI reads the file; this takes the state dict. A problem module has no
-    business knowing where checkpoints live, and passing the dict keeps
-    `pinn init --from` the only place that decides what a source file means.
+    A model to start training from: fresh at `topology`, or adapted from an existing
+    checkpoint's `state`. Exactly one of the two. Takes the state dict rather than a
+    path, so `pinn init --from` stays the only place that reads a source file.
     """
     if (state is None) == (topology is None):
         raise ValueError("pass exactly one of state, topology")
@@ -279,19 +239,19 @@ if __name__ == "__main__":
     assert premium.net[0].in_features == FEATURE_COUNT
     assert u.shape == muhat.shape and u.isfinite().all()
 
-    # At log_scale = 0 the premium obeys both proven properties by
-    # construction: 0 <= u <= the free-information bound.
+    # At `log_scale = 0` the premium obeys both proven properties by construction: it
+    # sits between 0 and the free-information bound.
     bound = nu(-muhat, tauhat.rsqrt())
 
     assert (u >= 0).all() and (u <= bound + 1e-6).all()
 
-    # The self-similar continuation below the floor: there the premium in
-    # shape units is a function of z ALONE -- the floor's own shape, frozen
-    # -- so it is identical at every tauhat <= PRIOR_FLOOR and continuous
-    # into the floor itself.
+    # The self-similar continuation below the floor: there the premium in shape units
+    # is a function of z *alone* (the floor's own shape, frozen), so it is identical
+    # at every `tauhat <= PRIOR_FLOOR` and continuous into the floor itself.
     z_grid = torch.linspace(0.0, 3.0, 16)
 
     def shape(tauhat_value: float) -> Tensor:
+        """The premium in shape units along the z grid, at one tauhat."""
         deep = torch.full((16,), tauhat_value)
 
         return deep.sqrt() * premium(z_grid / deep.sqrt(), deep)
@@ -303,9 +263,9 @@ if __name__ == "__main__":
 
     assert torch.allclose(v, torch.relu(muhat) + u)
 
-    # The deployment wrapper: at rho = sigma = 1 on muhat >= 0 it equals the
-    # dimensionless form; across the ridge V(mu) - V(-mu) is exactly the
-    # commit-value gap mu / rho; and units scale by the readout dictionary.
+    # The deployment wrapper: at `rho = sigma = 1` on `muhat >= 0` it equals the
+    # dimensionless form, across the ridge `V(mu) - V(-mu)` is exactly the
+    # commit-value gap `mu / rho`, and units scale by the readout dictionary.
     dimensionless = DimensionlessValueFunction(premium)
     wrapper = ValueFunction(dimensionless, rho=1.0, sigma=1.0)
 

@@ -86,7 +86,7 @@ the loss. A loss term negotiates; an architecture guarantees.
   layer (49% saturated). Wide-shallow nets survive by redundancy and hide
   the bug; deep profiles die of it, and "depth doesn't work here" was the
   misdiagnosis. Fix: calibrate a per-feature scale FROM THE SAMPLING LAW
-  once at init, stored as a buffer so checkpoints carry it.
+  once at init, stored as a buffer so model files carry it.
 - **Feature alignment beats capacity.** Inputs in the coordinates where the
   solution's structures are axis-aligned (z-scores, log scales, tail
   coordinates) moved orders of magnitude; width and depth moved little.
@@ -126,7 +126,7 @@ the loss. A loss term negotiates; an architecture guarantees.
   10k iterations. Every "stubborn
   region" we hit was EITHER unvisited (fix: sampling law) OR structurally
   unconstrained (no law helps). Discriminate by measurement: bucket the
-  relevant residual by distance-to-region on the current checkpoint. We
+  relevant residual by distance-to-region on the current model. We
   found one of each: the startup corner was starvation (1e-5 mass); the
   wall-seam cross-derivative error was NOT (wall residuals flat in seam
   distance — the conditions underdetermine those derivatives, and a
@@ -196,9 +196,9 @@ the loss. A loss term negotiates; an architecture guarantees.
   before): the preconditioning it used to provide was baked into the
   units. Plain Adam + lr decay sufficed everywhere after that.
 - **Training prints lie two ways.** At hot lr the printed loss is the Adam
-  orbit radius, not the valley floor (a checkpoint evaluated 5-20x better
+  orbit radius, not the valley floor (a model evaluated 5-20x better
   than its own training prints). And a mean loss flatters localized error
-  (loss 3e-5 with 40% relative error in a thin corner). Judge checkpoints
+  (loss 3e-5 with 40% relative error in a thin corner). Judge models
   by probes, never by the training curve.
 - **Loss values do not compare across grading or sampling changes.** Every
   such change re-denominates the objective. Keep invariant yardsticks:
@@ -207,7 +207,7 @@ the loss. A loss term negotiates; an architecture guarantees.
 
 ## 5. Diagnosis: probes, signatures, discriminating experiments
 
-Standing battery per checkpoint: 2-D slices in similarity-scaled windows
+Standing battery per model: 2-D slices in similarity-scaled windows
 (mean axes in units of posterior sd), line probes across the scale decades,
 residual bucketed per decade, and structure probes (symmetry of quantities
 that must be equal, argmax fields at known-symmetric points).
@@ -224,7 +224,7 @@ Signature dictionary (all observed, all diagnostic):
   subnormal dust before believing them (envelopes underflow).
 - Exactly-zero anything => structural, never luck; verify which structure.
 
-Discriminating experiments are cheap — design for one bit: same checkpoint
+Discriminating experiments are cheap — design for one bit: same model
 continued under (a) vs (b) (lr, tie weight, batch); float32 vs float64
 evaluation of the SAME weights (separates arithmetic noise from function
 error — it exonerated float32 when we were sure it was guilty); residuals
@@ -336,7 +336,7 @@ bucketed by the suspected cause.
   pairs (near-parallel directions, opposite-sign heads) before promoting
   the spline to a primitive.
 - **Stitch, don't retrain: zero-init the branch head.** The grafted net is
-  bit-identical to the checkpoint at step 0 (asserted, not assumed), and
+  bit-identical to the model at step 0 (asserted, not assumed), and
   gradient wakes the branch. The zero head is a benign saddle — Adam's
   per-parameter normalization walks out of it in a few thousand steps when
   the residual signal is sign-consistent. Alive-start applies one level
@@ -495,7 +495,7 @@ Rules purchased:
 Inheriting weights from a solved sibling problem buys the first few thousand
 iterations and then costs everything after. Measured on two_arm_drift, which
 is two_arm plus one coordinate: the drift net can be initialized from a
-two_arm checkpoint and reproduces it BITWISE on the `etahat = 0` slice, because
+two_arm model and reproduces it BITWISE on the `etahat = 0` slice, because
 the drift feature `log1p(2 etahat tauhat)` vanishes identically there. The
 bootstrap is exact, cheap, and structurally protected -- and still the wrong
 move.
@@ -549,7 +549,7 @@ Rules:
 
 ## 12. Artifacts declare their shape; loaders never infer it (2026-08-13)
 
-A checkpoint is a state dict, and it is tempting to recover the architecture
+A model file is a state dict, and it is tempting to recover the architecture
 from it by measuring: hidden widths from weight shapes, kink count from
 whether `kink_in.weight` exists, feature count from the first layer's input
 width. It works, so it survives — and every one of those is a load-bearing
@@ -557,13 +557,13 @@ fact reconstructed from a coincidence of geometry.
 
 What it cost here, in one session:
 
-- A checkpoint could not be loaded without a second file on disk being the
+- A model file could not be loaded without a second file on disk being the
   right shape. A net that embedded a frozen basis sized it by reading the
   champion symlink, so an unrelated experiment repointing that link made
-  every such checkpoint unloadable — even though the basis weights were IN
+  every such model file unloadable — even though the basis weights were IN
   the file.
 - Two grafts silently corrupted what they wrote. Stitching a smooth
-  checkpoint into a kinked net copied the source's `kink_count = 0` over the
+  model into a kinked net copied the source's `kink_count = 0` over the
   target's 8, saving a declaration the file's own weights disprove; the same
   bug, independently, copied a source's hidden widths into a wider target.
 - The `kink_` PREFIX matched more than the kink branch. Two sibling modules
@@ -582,12 +582,12 @@ hold:
   changes shape — writes a lie.
 - Migrate the artifacts, then DELETE the inference. Keeping the old path "for
   compatibility" means the fragile code is still what runs on anything old,
-  which is exactly the case nobody tests. Rewriting every checkpoint took one
+  which is exactly the case nobody tests. Rewriting every model file took one
   idempotent script and one pass; the backfill belongs in that script, which
   may guess because it is told which problem each file is, never in the
   library, which must not.
 
-Generalizes past checkpoints: whenever a consumer reconstructs a producer's
+Generalizes past model files: whenever a consumer reconstructs a producer's
 intent from the shape of what arrived, the reconstruction is a second source
 of truth that drifts. Prefix-matching a serialized namespace is the same
 mistake wearing a string.
@@ -603,7 +603,7 @@ to resolve a 2% effect at 2 sigma fall from tens of thousands to ~1,900.
 Two failures follow from ignoring it:
 
 - Sizing from the unpaired spread. A 50k-rep sweep was launched to compare two
-  checkpoints whose difference a few thousand paired reps would have settled.
+  models whose difference a few thousand paired reps would have settled.
   The rep count was not the waste; the ESTIMATOR was, and the rep count was
   merely how the waste got paid for.
 - Running the comparison as two SEPARATE processes. Both entrants belong in
@@ -618,3 +618,70 @@ trainers, 48 threads gave 68 runs/s at load average 177 — oversubscribed and
 thrashing. Time a `--size 500` probe at two or three thread counts on the box
 you will actually use, then launch. It costs ~15 seconds against sweeps
 measured in hours.
+
+## 14. Gaussian expectations: the closed forms, and where float32 bites (2026-08-17)
+
+`pinn/utils/gaussian.py` computes three things the envelopes are built on. The
+formulae live here because they are consulted, not glanced at, and because a
+future editor cannot check the implementation against anything else.
+
+**Phi2, the bivariate normal cdf**, in the Genz/Sheppard single-integral form:
+
+    Phi2(h, k; rho) = Phi(h) Phi(k) + 1/(2 pi)
+        int_0^{asin rho} exp(-(h^2 + k^2 - 2 h k sin t) / (2 cos(t)^2)) dt
+
+on 24 fixed Gauss-Legendre nodes. Two properties are load-bearing. The exponent
+is never positive, because the quadratic is at least `(h - k)^2`, so the tails
+UNDERFLOW to 0 instead of overflowing. And the nodes are fixed at import, which
+is what makes Phi2 an elementary smooth composition of exp/sin/cos, so it
+survives repeated differentiation under `create_graph=True`.
+
+**nu, the expected positive part**: `nu(m, sd) = m Phi(m/sd) + sd phi(m/sd)`,
+derived in kb/three_arm.md section 13. Limits: 0 as `m -> -inf`,
+`sd/sqrt(2 pi)` at `m = 0`, `m` as `m -> +inf`.
+
+**nu2, the bivariate version** `E[max(0, X, Y)]`, which is the three-arm
+free-information envelope and has no derivation elsewhere. With
+`h_b = m_b/sd_b`, `h_c = m_c/sd_c`, and the difference `X - Y` carrying standard
+deviation
+
+    a = sqrt((sd_b - sd_c)^2 + 2 sd_b sd_c (1 - rho))
+    d = (m_b - m_c) / a,    root = sqrt(1 - rho^2)
+
+    nu2 = m_b Phi2(h_b, d; r_b) + m_c Phi2(h_c, -d; r_c)
+          + sd_b phi(h_b) Phi(g_b) + sd_c phi(h_c) Phi(g_c)
+          + a phi(d) Phi(A)
+
+    r_b = (sd_b - rho sd_c) / a,      r_c = (sd_c - rho sd_b) / a
+    g_b = (rho h_b - h_c) / root,     g_c = (rho h_c - h_b) / root
+    A = (sd_c m_b (sd_c - rho sd_b) + sd_b m_c (sd_b - rho sd_c))
+        / (sd_b sd_c a root)
+
+Limits that make good self-checks: `nu2 -> nu(m_b, sd_b)` as `m_c -> -inf`, and
+`max(nu_b, nu_c) <= nu2 <= nu_b + nu_c`.
+
+Two clamps, both against float32 rather than against the mathematics:
+
+- **The correlation** is clamped to `+-(1 - 1e-6)`, where `asin'(rho)` and
+  `1/sqrt(1 - rho^2)` both blow up. That keeps float64 gradients finite; a
+  float32 caller should stay under `1 - 1e-3`, below which `1 - rho` has lost
+  all but a digit.
+- **The result** is clamped at 0. `nu >= 0` is a theorem, but float32
+  cancellation in the deep negative tail returns about `-1e-8`, and every
+  downstream positivity guarantee would inherit it.
+
+## 15. A broken measurement scores as a win (2026-08-12)
+
+A training loop that keeps the BEST model reads its score as "smaller is
+better", so a measurement that breaks toward zero is indistinguishable from a
+solved equation, and it wins every comparison that follows.
+
+Seen on two_arm: the run printed `pde 0.000e+00` from iteration 131,100 onward,
+with ridge at 2.4e-12, so it was not the never-explore solution. It then trained
+340k further iterations on the dead gradient and saved a model measuring
+2.9e-1 where it had been 4.2e-5. The cause is still unknown.
+
+The guard is cheap and belongs in any loop that saves on a metric: treat exactly
+0.0 and any non-finite score as a broken measurement, not a result. Count them,
+and make the count loud. What it cost to learn was one champion overwritten by
+its own wreck, silently, over a run long enough that nobody was watching.

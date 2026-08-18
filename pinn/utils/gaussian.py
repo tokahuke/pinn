@@ -1,7 +1,4 @@
-"""
-Gaussian expectations: the free-information envelopes every problem is
-built on.
-"""
+"""Gaussian expectations: the free-information envelopes every problem is built on."""
 
 from __future__ import annotations
 
@@ -13,6 +10,7 @@ from torch import Tensor
 
 
 SQRT_2PI = math.sqrt(2.0 * math.pi)
+"""The normal density's normalising constant, spelled out once."""
 
 # Genz quadrature rule for the bivariate cdf: Gauss-Legendre on [0, 1], nodes fixed
 # at import. Fixed nodes are what make Phi2 an elementary smooth composition
@@ -21,18 +19,23 @@ _NODES, _WEIGHTS = np.polynomial.legendre.leggauss(24)
 _NODES = 0.5 * (_NODES + 1.0)
 _WEIGHTS = 0.5 * _WEIGHTS
 
-# Correlations are clamped off +-1, where asin'(rho) and 1/sqrt(1 - rho**2) both
-# blow up. 1e-6 keeps float64 gradients finite; float32 callers should keep
-# |rho| <= 1 - 1e-3, below which 1 - rho has lost all but a digit of precision.
 _RHO_MAX = 1.0 - 1e-6
+"""
+How close to +-1 a correlation may come, where asin'(rho) and 1/sqrt(1 - rho**2) both
+blow up. 1e-6 keeps float64 gradients finite; float32 callers should keep
+|rho| <= 1 - 1e-3, below which 1 - rho has lost all but a digit of precision.
+"""
 
-# The rule lives in numpy, so converting it per call is a host-to-device copy
-# inside the autograd graph: 13% of a three_arm step on mps, measured
-# 2026-08-11. Cache per (dtype, device); there are never more than a few.
 _RULE: dict[tuple[torch.dtype, torch.device], tuple[Tensor, Tensor]] = {}
+"""
+The quadrature rule per (dtype, device), of which there are never more than a few.
+The rule lives in numpy, so converting it per call is a host-to-device copy inside
+the autograd graph: 13% of a three_arm step on mps, measured 2026-08-11.
+"""
 
 
 def _quadrature(like: Tensor) -> tuple[Tensor, Tensor]:
+    """The Gauss-Legendre nodes and weights, on the dtype and device of `like`."""
     key = (like.dtype, like.device)
 
     if key not in _RULE:
@@ -45,20 +48,15 @@ def _quadrature(like: Tensor) -> tuple[Tensor, Tensor]:
 
 
 def _normal_pdf(x: Tensor) -> Tensor:
+    """The standard normal density."""
     return torch.exp(-0.5 * x**2) / SQRT_2PI
 
 
 def _bivariate_ndtr(h: Tensor, k: Tensor, rho: Tensor) -> Tensor:
     """
-    Standard bivariate normal cdf P(X <= h, Y <= k) with corr(X, Y) = rho, in the
-    Genz/Sheppard single-integral form
-
-        Phi2(h, k; rho) = Phi(h) Phi(k) + 1/(2 pi)
-            int_0^{asin rho} exp(-(h**2 + k**2 - 2 h k sin t) / (2 cos(t)**2)) dt
-
-    on 24 fixed Gauss-Legendre nodes. The exponent is never positive (the
-    quadratic is at least (h - k)**2), so the tails underflow to 0 instead of
-    overflowing, and cos(t)**2 stays bounded away from 0 by the rho clamp.
+    Standard bivariate normal cdf P(X <= h, Y <= k) with corr(X, Y) = rho, by Genz
+    quadrature on 24 fixed nodes. The integral, why its exponent cannot overflow and
+    why the nodes are fixed: kb/learnings.md section 14.
     """
     h, k, rho = torch.broadcast_tensors(h, k, rho)
     nodes, weights = _quadrature(h)
@@ -79,15 +77,9 @@ def _bivariate_ndtr(h: Tensor, k: Tensor, rho: Tensor) -> Tensor:
 
 def nu(mean: Tensor, stddev: Tensor) -> Tensor:
     """
-    Expected positive part of a Gaussian: E[max(0, X)] for X ~ N(mean,
-    stddev**2),
-
-        nu = mean * Phi(mean/stddev) + stddev * phi(mean/stddev)
-
-    with Phi, phi the standard normal cdf and density. The building block of
-    the free-information premium envelopes (kb/three_arm.md section 13).
-    Limits: 0 as mean -> -inf, stddev/sqrt(2 pi) at mean = 0, mean as
-    mean -> +inf.
+    Expected positive part of a Gaussian, E[max(0, X)] for X ~ N(mean, stddev**2):
+    the building block of every free-information envelope. Closed form and limits in
+    kb/three_arm.md section 13, restated in kb/learnings.md section 14.
     """
     z = mean / stddev
     expectation = mean * torch.special.ndtr(z) + stddev * torch.exp(
@@ -103,28 +95,9 @@ def nu2(
     mean_b: Tensor, mean_c: Tensor, stddev_b: Tensor, stddev_c: Tensor, rho: Tensor
 ) -> Tensor:
     """
-    Two-arm version of nu: E[max(0, X, Y)] for (X, Y) bivariate normal with means
-    (mean_b, mean_c), standard deviations (stddev_b, stddev_c) and correlation
-    rho. Writing h_b = mean_b/stddev_b, h_c = mean_c/stddev_c, and using the
-    difference X - Y, which has standard deviation
-
-        a = sqrt((stddev_b - stddev_c)**2 + 2 stddev_b stddev_c (1 - rho)),
-        d = (mean_b - mean_c) / a,   root = sqrt(1 - rho**2),
-
-        nu2 = mean_b Phi2(h_b, d; r_b) + mean_c Phi2(h_c, -d; r_c)
-              + stddev_b phi(h_b) Phi(g_b) + stddev_c phi(h_c) Phi(g_c)
-              + a phi(d) Phi(A)
-
-    with r_b = (stddev_b - rho stddev_c) / a, r_c = (stddev_c - rho stddev_b) / a,
-    g_b = (rho h_b - h_c) / root, g_c = (rho h_c - h_b) / root, and
-
-        A = (stddev_c mean_b (stddev_c - rho stddev_b)
-             + stddev_b mean_c (stddev_b - rho stddev_c))
-            / (stddev_b stddev_c a root).
-
-    The three-arm free-information envelope (kb/three_arm.md section 13). Limits:
-    nu(mean_b, stddev_b) as mean_c -> -inf, and max(nu_b, nu_c) <= nu2 <=
-    nu_b + nu_c. rho is clamped to +-(1 - 1e-6) inside; see _RHO_MAX.
+    Two-arm version of nu: E[max(0, X, Y)] for (X, Y) bivariate normal, which is the
+    three-arm free-information envelope. The five-term closed form, the limits worth
+    self-checking, and the rho clamp: kb/learnings.md section 14.
     """
     rho = rho.clamp(-_RHO_MAX, _RHO_MAX)
     a = torch.sqrt((stddev_b - stddev_c) ** 2 + 2.0 * stddev_b * stddev_c * (1.0 - rho))

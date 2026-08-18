@@ -133,7 +133,7 @@ network is told:
 
     etahat = eta / (rho sigma)
 
-One trained checkpoint therefore serves every drift regime, including
+One trained model therefore serves every drift regime, including
 `etahat = 0`, which is three_arm exactly.
 
 Readout dictionary is `three_arm.md` section 11 plus that one line.
@@ -257,7 +257,8 @@ graded:
   float32-ungradeable even for the exact solution. This was the ~1e0
   training wall: from-scratch 96:96:96 at lr 1e-3 plateaued at pde ~8-9
   through 20k and read 5.7 at 30k; the same config with the pair floor
-  restored read 6.4 at 1k and 1.5 at 10k.
+  restored read 6.4 at 1k and 1.5 at 10k. Held batch, fenced at the floor:
+  40x lower.
 
 The module self-checks now assert the pair floor itself, not its det
 consequence — the assert that catches both cuts (the det-quantile match on
@@ -267,8 +268,9 @@ still sampled even though the containment argument calls them unreachable:
 extra coverage, not error. The ceiling is additionally capped at a static
 `DET_MAX = 1e3` as `etahat -> 0` (just above the static law's reach): left
 to diverge as `1/etahat^2` it filled 17% of the cloud with precision decades
-the static problem never visits, miscalibrating `feature_scale` ~1000x on
-the raw tau features.
+the static problem never visits (det up to 3.8e12 against the static law's own
+max of ~8e2, measured 2026-08-09), miscalibrating `feature_scale` ~1000x on
+the raw tau features and railing a grafted net's first tanh layer.
 
 ## 7. The envelope
 
@@ -462,6 +464,32 @@ bucket the residual by `etahat` decade. If the high decades dominate, the fix
 is sampling density, not a new weight — those are one mechanism, per
 `learnings.md` section 7.
 
+### The auxiliary weights, as calibrated
+
+Both are set on the MEDIAN over several draws, never one: these losses are
+heavy-tailed enough that a single batch misleads by two orders, and a
+single-draw calibration put `CONCAVITY_WEIGHT` at 730% of the equation.
+
+    TIE_WEIGHT        2.4e2    set against a pde median of 2.4 under the
+                               two-sided loss. The anchor is now a violation
+                               of 3.6e-2, so it is PROVISIONAL and wants
+                               re-deriving once the retrain settles.
+    CONCAVITY_WEIGHT  2.2e-1   target ~5% of the equation, re-derived
+                               2026-08-13 against the pair-floor fence in
+                               sample.py, which cut the champion's median pde
+                               ~2x more and left the old 1.2 at 28%.
+    CONCAVITY_SCALE   1.0e-3   three_arm's, deliberately: sharing it keeps a
+                               violation meaning the same thing in both
+                               problems and the two terms comparable.
+
+At the same 2026-08-13 re-derivation `TIE_WEIGHT` read 4.8% of the equation
+and 2.2x the 100x dead-solution floor, so it was kept where it was.
+
+The ties PLACE the solution. The climb term kills the never-explore
+degeneracy on its own, but nothing else in the objective knows where the free
+boundary belongs.
+
+
 ## 9. Architecture consequences
 
 - **Feature.** One more, `log1p(2 sqrt3 etahat^2 det T)`: exactly zero at
@@ -470,16 +498,87 @@ is sampling density, not a new weight — those are one mechanism, per
   aligned with the erosion's own coefficient. Appended last, since grafting
   pads on the right.
 - **Envelope.** Section 7, replacing `nu2`.
-- **Response.** `relu(r)^2 / (1 + relu(r)^2)`, unchanged. Note this puts the
-  premium at exactly zero on a region where section 5 says it should merely be
-  very small. That is a known approximation, inherited from two_arm_drift,
-  where it trains well; it is a training question, not a reason to give up a
-  cap that is true by construction.
+- **Response.** `y / (1 + y)` with `y = (softplus(k r) / k)^2`, replacing the
+  inherited `relu(r)^2 / (1 + relu(r)^2)` on 2026-08-14. The subsection below
+  has the reason and the measurement.
 - **Maximisation.** `three_arm/simplex.py` reused unchanged.
 - **Sampler.** Section 6.
 - **Loss.** `etahat` threaded through; weight, power and wall weight untouched.
 - **Grafting.** Copy `stitch` from two_arm_drift: pad the first layer with a
   zero column, append the calibrated scale, default the kink tensors.
+
+### The response gate: softplus, not relu (2026-08-14)
+
+`y / (1 + y)` with `y = (softplus(k r) / k)^2` maps the response into `[0, 1)`,
+so `0 < u < envelope` is architectural and `u` is STRICTLY positive.
+
+Strictly is the point. Under drift there is no contact set: section 5's
+`u > 0` everywhere is a theorem, and a relu gate cannot represent it. The gap is
+worse than representational. The commit envelope solves the interior equation
+EXACTLY, so wherever relu pins `u` to 0 the residual is exactly 0 and an
+oversized commit region costs the loss nothing, leaving the free boundary
+determined only by a thin seam band. At `etahat ~ 7.5` it collapsed to the
+origin: arena 2026-08-14, commits at epoch ~93, precision time 67.5 +/- 1.1,
+evidence-independent.
+
+With the softplus tail, `u ~ envelope e^(2 k r)`, the transport equation grades
+the whole former dead region and never-explore leaves the function class.
+
+The cost, spent knowingly: at `etahat = 0` the true contact set is real and this
+gate can only approach it (`e^(-2 k |r|)`), so the three_arm graft anchor is
+CLOSE, not bitwise. That is the one place this problem gives up the exact
+anchor its siblings keep.
+
+Saturate rationally, not with `tanh`: float32 `tanh` is exactly 1 beyond
+`r ~ 2.5`, a cliff with no way back. Softplus on the low side for the same
+reason, since its tail keeps a live gradient at any depth float32 holds.
+
+
+### Grafting: what `stitch` does, and how close the anchor is
+
+`stitch` is explicit where three_arm does the same job implicitly inside
+`_load_from_state_dict`. It has to be: padding the first layer with a zero
+column for the drift feature is a shape change, and a `setdefault` cannot
+express one. BOTH layers that read the feature stack take the pad, the trunk
+and the kink branch, and forgetting the second is a shape error the moment
+anyone grafts a kinked model. The branch is matched BY NAME, never by a
+`kink_` prefix, which would also catch the `kink_count` buffer and leave the
+graft undeclared and unloadable.
+
+Kinks go both ways. A source without a branch keeps this net's zero-init one,
+so the graft is a no-op at step 0; a source WITH one loaded into a net without
+is dropped, which is the smooth-first path. Anything else missing is a real
+mismatch and fails loudly. Sources predating the softplus gate (2026-08-14)
+carry no sharpness, and this net's init (`k = 10`, near-relu) is the
+graft-faithful default.
+
+**The three_arm anchor is CLOSE, not bitwise**, and that is the one place this
+problem gives up the exact anchor its siblings keep. The source's relu gate and
+this class's softplus gate differ near the seam, decaying `e^(-2k|r|)` away
+from it. The self-check tolerance is 1.0e-2, MEASURED not derived: the seam
+estimate `(log2/k)^2 ~ 5e-3` would justify 6e-3, and the true max is 7.17e-3,
+stable to three digits across independent random inits, so a 6e-3 check fails
+deterministically rather than flaking. The derivation is loose by ~1.4x because
+the max is not attained at the seam. The invariant it guards, that the graft is
+close and the feature/cap/stitch chain is exact, is unaffected.
+
+### The kink branch
+
+Parallel saturated `relu(.)**2` primitives added to the response: movable
+curvature jumps for the free-boundary junction, which tanh ridges cannot
+synthesize cheaply. Each unit is `y/(1+y)` with `y = relu(.)**2`, so it keeps
+the curvature-jump regularity at the crease but its output is BOUNDED, which
+makes the branch architecturally bad at painting the smooth bulk and unable to
+colonize it in from-scratch co-training. Observed 2026-08-06 with bare
+`relu**2`: the branch outgrew the tanh stack early, took half the field, and
+scored 2 orders worse.
+
+The output layer is zero-init, so a branch stitched onto a trained model
+contributes exactly 0 at step 0 and training resumes from the model's own
+function. The input bias starts at +0.5 (the head-bias-1 lesson, one level
+down): a `relu**2` unit that is never active gets no gradient and never
+recovers, and default init left 3 of 8 dead (2026-08-06).
+
 
 ## 10. Verification
 

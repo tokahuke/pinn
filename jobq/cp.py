@@ -1,6 +1,4 @@
-"""
-`jobq cp`: files to or from the pod.
-"""
+"""`jobq cp`: files to or from the pod."""
 
 from __future__ import annotations
 
@@ -16,21 +14,10 @@ from .pod import Pod, shell
 @click.argument("paths", nargs=-1, required=True)
 def cp(name: str, paths: tuple[str, ...]) -> None:
     """
-    Copy PATHS, scp-style: a leading `:` marks the pod side.
-
-    `jobq up` rsyncs the repo but excludes data/, so this is how a checkpoint
-    travels -- continuing a champion rather than starting cold:
-
-        jobq cp data/two_arm_drift.pt :/workspace/
-        jobq run pinn train --problem two_arm_drift --in /workspace/two_arm_drift.pt
-        jobq cp :/workspace/two_arm_drift.pt data/pod/
-
-    One direction per call: either the destination is remote or the sources
-    are, never both.
-
-    -L, not plain -a: the canonical checkpoint names are symlinks onto the
-    topology-tagged file, and rsync's default is to send the link itself,
-    which arrives dangling.
+    Copy PATHS, scp-style: a leading `:` marks the pod side, one direction per call
+    (`jobq cp data/two_arm.pt :/workspace/`). This is how a checkpoint travels, since
+    `jobq up` excludes data/. Sent with -L, not plain -a: the canonical names are
+    symlinks and rsync's default sends the link itself, which arrives dangling.
     """
     if len(paths) < 2:
         raise click.ClickException("need at least a source and a destination")
@@ -46,6 +33,7 @@ def cp(name: str, paths: tuple[str, ...]) -> None:
     pod = Pod.require(name)
 
     def resolve(path: str) -> str:
+        """One path as rsync wants it, with a leading `:` becoming the pod's host."""
         return f"{pod.host}:{path[1:]}" if path.startswith(":") else path
 
     shell(

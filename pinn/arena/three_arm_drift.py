@@ -1,22 +1,13 @@
 """
-The three-arm problem with drifting effects in the arena: the drift, the
-filter that forecasts through it, and the policy zoo.
+The three-arm problem with drifting effects in the arena: the drift, the filter that
+forecasts through it, and the policy zoo.
 
-ASSEMBLED, not written: the effect draw, the observation model and every
-policy's `propose` are three_arm's unchanged -- drift changes neither what an
-epoch buys nor how a policy reads a posterior. Only two things are new, and
-both are the two_arm_drift move carried to a 2x2 posterior:
-
-- `advance` walks the ARMS, not the contrasts. Three independent walks at
-  volatility eta give the contrasts covariance eta^2 (I + 11'), the shared
-  -theta_a putting eta^2 in the off-diagonal -- the same erosion matrix the
-  trained net is graded against (three_arm_drift/loss.py pins the formula).
-- `Filter` forecasts before it updates, so precision decays where the two-arm
-  zoo's scalar recursion decays. Written as T (I + E T)^-1 rather than
-  (T^-1 + E)^-1 for the reason two_arm_drift writes tau / (1 + eta^2 tau): a
-  flat start has T = 0 and needs no special case.
-
-At eta = 0 every number here is three_arm's, which the demo asserts.
+**Assembled**, not written: the effect draw, the observation model and every policy's
+`propose` are three_arm's unchanged, because drift changes neither what an epoch buys
+nor how a policy reads a posterior. Only `advance`, which walks the *arms*, and
+`Filter`, which forecasts before it updates, are new, both the two_arm_drift move
+carried to a 2x2 posterior. At eta = 0 every number here is three_arm's, which the demo
+asserts. kb/arena_results.md has the erosion matrix and the recursion's form.
 """
 
 from __future__ import annotations
@@ -28,38 +19,40 @@ from pathlib import Path
 from torch import Tensor
 from typing import Self
 
-from ..problems.three_arm_drift import DimensionlessValueFunction, ValueFunction
+from ..problems.three_arm_drift.model import DimensionlessValueFunction, ValueFunction
 from . import three_arm as static
 from .harness import Params, Policy, Runner
 from .three_arm import draw_effect, observe
 
 CHECKPOINT = Path("data") / "three_arm_drift.pt"
+"""The champion the Pinn policy plays, repo-root relative like every other data path."""
 
-# Two observation draws plus one walk per arm. Declared for the harness, whose
-# default of 2 is what keeps the static zoos' recorded numbers reproducible.
 DRAWS_PER_EPOCH = 5
+"""
+Two observation draws plus one walk per arm. Declared for the harness, whose default of
+2 is what keeps the static zoos' recorded numbers reproducible.
+"""
 
-# The weakest prior the champion is trusted at, in dimensionless precision --
-# three_arm's, which is the sampler's own PRIOR_FLOOR, so the guard does not
-# clamp inside the training support.
 _FLATTEST_TAUHAT = 1e-3
+"""
+The weakest prior the champion is trusted at, in dimensionless precision. It is
+three_arm's value, the sampler's own PRIOR_FLOOR, so the guard does not clamp inside
+the training support.
+"""
 
 
 @cache
 def _champion() -> DimensionlessValueFunction:
+    """One load per process; read-only sharing, since nothing here trains."""
     return DimensionlessValueFunction.load(CHECKPOINT)
 
 
 def advance(runner: Runner, deltas: Tensor) -> Tensor:
     """
-    One epoch of drift. Each ARM's truth takes an independent step at
-    volatility eta; the contrasts inherit the control's step with a minus
-    sign, which is what correlates them.
-
-    Unconditional, like two_arm_drift's: at eta = 0 the draws are N(0, 0) and
-    the world is static, so no branch anywhere depends on the drift. It does
-    consume three variates per epoch either way, so this zoo's noise stream is
-    its own -- do not compare run-for-run against three_arm's.
+    One epoch of drift. Each *arm's* truth takes an independent step at volatility eta,
+    and the contrasts inherit the control's step with a minus sign, which correlates
+    them. Unconditional, so nothing branches on drift, at three variates per epoch
+    either way: this zoo's stream is not comparable run-for-run against three_arm's.
     """
     walk_a = runner.normal(0.0, runner.params.eta)
     walk_b = runner.normal(0.0, runner.params.eta)
@@ -77,15 +70,13 @@ def advance(runner: Runner, deltas: Tensor) -> Tensor:
 
 class Filter(static.Bayesian):
     """
-    three_arm's posterior with erosion: carried as (mean, precision) rather
-    than (evidence, precision), because forecasting needs the covariance and
-    a flat prior cannot be inverted.
+    three_arm's posterior with erosion: carried as (mean, precision) rather than
+    (evidence, precision), because forecasting needs the covariance and a flat prior
+    cannot be inverted.
 
-    `t_bb`, `t_bc`, `t_cc` and `mean()` keep three_arm's meaning, which is what
-    lets every policy there be reused verbatim.
-
-    `eta` is a POLICY parameter, as in two_arm_drift: `init` ties it to the
-    environment's, and constructing directly unties it.
+    `t_bb`, `t_bc`, `t_cc` and `mean()` keep three_arm's meaning, which is what lets
+    every policy there be reused verbatim. `eta` is a *policy* parameter, as in
+    two_arm_drift: tied to the environment's by `init`, untied by direct construction.
     """
 
     def __init__(
@@ -97,6 +88,7 @@ class Filter(static.Bayesian):
         self.m_c = torch.zeros(reps, dtype=torch.float64, device=device)
 
     def mean(self) -> tuple[Tensor, Tensor]:
+        """The posterior mean of the contrasts, carried rather than solved for."""
         return self.m_b, self.m_c
 
     def _erode(self) -> None:
@@ -130,7 +122,7 @@ class Filter(static.Bayesian):
         self.count += 1
         self._erode()
 
-        # Information-form update on the FORECAST posterior: T' = T + G and
+        # Information-form update on the *forecast* posterior: T' = T + G and
         # T' m' = T m + dq.
         q_b = self.t_bb * self.m_b + self.t_bc * self.m_c + dq[:, 0].double()
         q_c = self.t_bc * self.m_b + self.t_cc * self.m_c + dq[:, 1].double()
@@ -146,22 +138,22 @@ class Filter(static.Bayesian):
 
 
 class ExploreThenCommit(static.ExploreThenCommit, Filter):
-    pass
+    """three_arm's, reading the eroding posterior."""
 
 
 class ProbabilityMatching(static.ProbabilityMatching, Filter):
-    pass
+    """three_arm's, reading the eroding posterior."""
 
 
 class Elimination(static.Elimination, Filter):
-    pass
+    """three_arm's, reading the eroding posterior."""
 
 
 class Pinn(Filter):
     """
     The trained three_arm_drift HJB policy, mapped onto arena units with rate
-    gamma = 1 - rho. Its etahat is the POLICY's eta, so one checkpoint plays
-    every column of the misspecification grid.
+    gamma = 1 - rho. Its etahat is the *policy's* eta, so one checkpoint plays every
+    column of the misspecification grid.
     """
 
     def __init__(
@@ -183,9 +175,7 @@ class Pinn(Filter):
 
     @property
     def prior_precision(self) -> float:
-        """
-        The arm-symmetric prior (off-diagonal -1/2), three_arm's convention.
-        """
+        """The arm-symmetric prior (off-diagonal -1/2), three_arm's convention."""
         if self.prior_std is not None:
             return 4.0 / (3.0 * self.prior_std**2)
 
@@ -214,15 +204,15 @@ class Pinn(Filter):
 
 
 def demo() -> None:
+    """At eta = 0 the filter is three_arm's, and erosion is the matrix it claims."""
     import pinn.arena.three_arm_drift as problem
 
     reps = 64
     seeds = list(range(reps))
 
-    # eta = 0 is three_arm EXACTLY, checked on the FILTER rather than on a
-    # run: this zoo eats three extra variates an epoch, so its noise stream is
-    # deliberately not aligned with three_arm's and two runs cannot be compared
-    # draw for draw. Drive both posteriors with the same observations instead.
+    # eta = 0 is three_arm **exactly**, checked on the *filter* rather than on a run,
+    # since this zoo's noise stream is deliberately not aligned with three_arm's. Drive
+    # both posteriors with the same observations instead.
     static_params = Params(
         rho=0.999, horizon=60, sigma=1.0, effect=0.0, effect_std=0.4, size=reps, eta=0.0
     )
@@ -241,16 +231,15 @@ def demo() -> None:
         eroding.observe(observation)
         plain.observe(observation)
 
-    # rtol 1e-4, not tighter: three_arm accumulates the evidence q in FLOAT32
-    # and inverts at read time, while this filter carries the mean in float64
-    # and folds each observation in. The gap is that float32 accumulation --
-    # this side is the more precise one -- and it lands at ~1e-7 relative.
+    # rtol 1e-4, not tighter: three_arm accumulates q in *float32* while this filter
+    # carries the mean in float64, and that gap lands at ~1e-7 relative (this side
+    # being the more precise one).
     for got, want in zip(eroding.mean(), plain.mean()):
         assert torch.allclose(got, want, rtol=1e-4, atol=1e-9), (got[:3], want[:3])
     assert torch.allclose(eroding.t_bb, plain.t_bb, rtol=1e-12)
     assert torch.allclose(eroding.t_bc, plain.t_bc, rtol=1e-12)
 
-    # Erosion is a one-way ratchet on information: with eta > 0 and the SAME
+    # Erosion is a one-way ratchet on information: with eta > 0 and the *same*
     # allocations, the posterior is strictly less precise than the static one.
     drift_params = Params(
         rho=0.999, horizon=60, sigma=1.0, effect=0.0, effect_std=0.4, size=reps, eta=0.2

@@ -8,27 +8,32 @@ import click
 import math
 import torch
 
-from importlib import import_module
 from pathlib import Path
 
-from ..problems import PROBLEMS
-
+from ..problems import Problem
 from ..train import train as run_training
 from ..train import train_graphed as graphed_training
 
-# In natural units the residual spans six orders, so even at POWER = 1 the
-# gradient rides ~1.3% of the batch: effective sample size at 4096 is 69
-# (two_arm), 177 (two_arm_drift), 54 (three_arm), 36 (three_arm_drift).
-# Raise it if a run oscillates.
 BATCH = 4096
-# Best available, not hardcoded: mps is ~2x CPU here, but the command has to
-# keep working where there is no Metal.
+"""
+In natural units the residual spans six orders, so even at POWER = 1 the gradient rides
+~1.3% of the batch: effective sample size at 4096 is 69 (two_arm), 177 (two_arm_drift),
+54 (three_arm), 36 (three_arm_drift). Raise it if a run oscillates.
+"""
+
 DEVICE = "mps" if torch.backends.mps.is_available() else "cpu"
+"""
+Best available, not hardcoded: mps is ~2x CPU here, but the command has to keep working
+where there is no Metal.
+"""
 
 
 @click.command()
 @click.option(
-    "--problem", type=click.Choice(PROBLEMS), required=True, help="Which problem."
+    "--problem",
+    type=click.Choice(Problem.names()),
+    required=True,
+    help="Which problem.",
 )
 @click.option(
     "--in",
@@ -98,73 +103,54 @@ def train(
     refresh: int,
 ) -> None:
     """
-    Train (Ctrl-C to stop), printing the loss now and then.
-
-    Saves the BEST net, not the last one: the loss oscillates around its floor
-    and the excursions hand back the descent between them. Scored on a 100-step
-    EMA so a lucky batch cannot win, checked at the print cadence. A run
-    shorter than 100 iterations writes nothing.
-
-    The rate is CONSTANT: no schedule, so a resume picks up where it left off
-    instead of restarting one at its hot end, which is what used to smear a
-    polished checkpoint for its first ~1k iterations.
+    Train (Ctrl-C to stop), printing the loss now and then, and saving the **best** net
+    rather than the last: the loss oscillates around its floor. Scored on a 100-step
+    EMA so a lucky batch cannot win, so a run under 100 iterations writes nothing. The
+    rate is constant, no schedule, so a resume picks up where it left off.
     """
     out_path = out_path if out_path is not None else in_path
 
-    # On an accelerator the cpu only issues kernels, and torch's default of
-    # ncpu/2 threads makes every small op in that path pay a fan-out it never
-    # earns back. Measured 2026-08-11 on a 96-core cuda box, two_arm_drift at
-    # batch 65536: 48 threads 388 ms/step, 8 threads 200, 1 thread 181. The
-    # bigger the box, the worse the default. Neutral on mps, so gate on cpu
-    # only, where the threads do real work.
+    # On an accelerator the cpu only issues kernels, so torch's ncpu/2 default buys a
+    # fan-out it never earns back: 96-core cuda box, batch 65536, 48 threads 388
+    # ms/step against 1 thread 181 (2026-08-11). Neutral on mps, so gate on cpu.
     if device != "cpu":
         torch.set_num_threads(1)
 
-    module = import_module(f"pinn.problems.{problem}")
+    chosen = Problem.named(problem)
     state = torch.load(in_path, map_location="cpu")
-    value = module.init_model(state=state).to(device)
-    graphing = graph_it and device.startswith("cuda") and hasattr(module, "draw")
+    value = chosen.init_model(state=state).to(device)
+    graphing = graph_it and device.startswith("cuda")
 
-    if graph_it is True and graphing is False and device.startswith("cuda"):
-        click.echo(f"--graph ignored: {problem} exposes no draw()")
-
-    # Train the wrapper, SAVE the original: a compiled module's state_dict
-    # carries `_orig_mod.` key prefixes, which every loader here would reject.
-    # torch.compile only ever captured the forward anyway (it refuses higher
-    # order gradients), and it has no business inside a graph capture.
+    # Train the wrapper, **save** the original: a compiled module's state_dict carries
+    # `_orig_mod.` prefixes every loader here rejects. torch.compile only ever captured
+    # the forward (it refuses higher order gradients) and has none inside a capture.
     trained = torch.compile(value) if compile_it and graphing is False else value
     out_path.parent.mkdir(parents=True, exist_ok=True)
     best, smoothed, collapsed = float("inf"), None, 0
     steps = (
         graphed_training(
             trained,
-            lambda: module.draw(batch, device),
-            module.loss,
+            lambda: chosen.draw(batch, device),
+            chosen.loss,
             lr=lr,
             refresh=refresh,
         )
         if graphing is True
-        else run_training(trained, module.objective(batch=batch, device=device), lr=lr)
+        else run_training(trained, chosen.objective(batch=batch, device=device), lr=lr)
     )
 
     try:
         for step, score in enumerate(steps):
-            # A score of exactly zero, or a non-finite one, is a broken
-            # MEASUREMENT, not a solved equation -- and the rule below reads
-            # "smaller is better", so without this it is recorded as the best
-            # result ever and overwrites a good checkpoint with the wreck.
-            # Seen 2026-08-12: a two_arm run printed pde 0.000e+00 from
-            # iteration 131,100 onward (ridge 2.4e-12, so NOT the never-explore
-            # solution), trained 340k further iterations on the dead gradient,
-            # and left a checkpoint measuring 2.9e-1 where it had been 4.2e-5.
-            # Cause still unknown; this makes it loud instead of silent.
+            # Exactly zero, or non-finite, is a broken *measurement*, and "smaller is
+            # better" would file it as the best result ever and overwrite a champion
+            # with the wreck. It happened: kb/learnings.md section 15.
             if score == 0.0 or math.isfinite(score) is False:
                 collapsed += 1
 
                 if collapsed in (1, 10, 100, 1000):
                     click.echo(
                         f"iter {step}: score {score} is not a measurement "
-                        f"({collapsed} so far) -- not saving, the run is dead"
+                        f"({collapsed} so far). Not saving, the run is dead."
                     )
 
                 continue
@@ -173,9 +159,9 @@ def train(
 
             if step % 100 == 99 and smoothed < best:
                 best = smoothed
-                # Saved on CPU whatever we trained on: the arena, probes and
-                # every loader read these without a map_location, and an
-                # mps-tensor checkpoint would fail for them.
+                # Saved on CPU whatever we trained on: the arena, probes and every
+                # loader read these without a map_location, and an mps-tensor
+                # checkpoint would fail for them.
                 torch.save(
                     {k: v.cpu() for k, v in value.state_dict().items()}, out_path
                 )

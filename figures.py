@@ -1,36 +1,40 @@
 """
-README visuals: the three-arm policy atlas (allocation as barycentric color
-over the mean plane, information growing left to right) and the two-arm arena
-result (regret and information spend relative to Thompson sampling).
-Palette: dataviz default categorical slots 1-3 (all-pairs validated).
+README visuals: the three-arm policy atlas (allocation as barycentric colour over the
+mean plane, information growing left to right) and the two-arm arena result (regret
+and information spend relative to Thompson sampling). Palette: dataviz default
+categorical slots 1-3 (all-pairs validated).
 """
 
 from __future__ import annotations
 
-import pickle
-
 import matplotlib.pyplot as plt
 import numpy as np
+import pickle
 import torch
 
-
+from collections.abc import Callable
 from matplotlib.patches import Patch
-
-from pinn.problems.three_arm import DimensionlessValueFunction, ValueFunction
+from pathlib import Path
+from pinn.problems.three_arm.model import DimensionlessValueFunction, ValueFunction
 
 BLUE, ORANGE, AQUA, YELLOW = "#2a78d6", "#eb6834", "#1baf7a", "#eda100"
+"""Categorical slots 1-4, one per entity, held across every chart here."""
+
 INK, MUTED = "#1a1f26", "#5b6472"
+"""Text and axis-furniture greys."""
 
 ANCHORS = np.array(
     [
-        [42 / 255, 120 / 255, 214 / 255],  # arm a (control) - blue
-        [235 / 255, 104 / 255, 52 / 255],  # arm b - orange
-        [27 / 255, 175 / 255, 122 / 255],  # arm c - aqua
+        [42 / 255, 120 / 255, 214 / 255],  # arm a (control): blue
+        [235 / 255, 104 / 255, 52 / 255],  # arm b: orange
+        [27 / 255, 175 / 255, 122 / 255],  # arm c: aqua
     ]
 )
+"""One colour per arm; the allocation mixes them into the atlas field."""
 
 
 def atlas() -> None:
+    """Render the three-arm policy atlas to docs/policy_atlas.png."""
     value = ValueFunction(
         DimensionlessValueFunction.load("data/three_arm.pt"), rho=1.0, sigma=1.0
     )
@@ -99,7 +103,11 @@ def arena(
     caption: str | None = None,
     xlim: float = 2.6,
 ) -> None:
-    # Color follows the entity across charts: PINN blue, Thompson orange,
+    """
+    Render one arena study as paired regret and evidence bars, each normalized to
+    Thompson sampling.
+    """
+    # Colour follows the entity across charts: PINN blue, Thompson orange,
     # explore-then-commit aqua, the significance-testing family yellow.
     entities = entities or [
         ("Pinn", "PINN (this repo)", BLUE),
@@ -107,7 +115,7 @@ def arena(
         ("ExploreThenCommit", "explore-then-commit", AQUA),
         ("ZTest", "z-test at 5%", YELLOW),
     ]
-    study = pickle.loads(open(study_path, "rb").read())
+    study = pickle.loads(Path(study_path).read_bytes())
     by_policy: dict[str, list] = {}
 
     for run in study.runs:
@@ -117,7 +125,8 @@ def arena(
     labels = [label for _, label, _ in entities]
     colors = [color for _, _, color in entities]
 
-    def stats(name: str, field) -> tuple[float, float]:
+    def stats(name: str, field: Callable[[object], float]) -> tuple[float, float]:
+        """One policy's mean of `field` over its runs, with a 95% interval."""
         values = np.array([field(r) for r in by_policy[name]])
 
         return values.mean(), 1.96 * values.std(ddof=1) / len(values) ** 0.5
@@ -127,19 +136,21 @@ def arena(
         "ProbabilityMatching", lambda r: getattr(r, "precision_time", 0.0)
     )
 
-    # Every number in the caption is COMPUTED from this study. A hardcoded one
-    # goes stale the first time the sweep is re-run and nothing catches it: the
-    # 2026-08-13 redraw still claimed "4,000 tests" and "less than half the
-    # evidence" against a 6,000-rep run measuring 0.57. Interpretation belongs
-    # in the README, not here -- one legend, not two.
+    # Every caption number is **computed** from this study: the 2026-08-13 redraw still
+    # claimed "4,000 tests" and "less than half the evidence" against a 6,000-rep run
+    # measuring 0.57. Interpretation belongs in the README, not here.
     if caption is None:
         pinn_regret, _ = stats("Pinn", lambda r: r.regret)
         pinn_info, _ = stats("Pinn", lambda r: getattr(r, "precision_time", 0.0))
         caption = (
-            f"Each strategy plays the same {len(by_policy['Pinn']):,} random tests. Regret: profit left on the table vs an oracle that\n"
-            "picks the winner from day one (lower is better). Evidence: total measurement bought - an even split measures at\n"
-            "full power, sending everyone to one arm measures nothing, and the sum counts perfect-split epochs of data.\n"
-            f"The PINN loses {1 - pinn_regret / ts_regret:.0%} less than Thompson sampling on {pinn_info / ts_info:.0%} of the evidence."
+            f"Each strategy plays the same {len(by_policy['Pinn'])} random tests. "
+            "Regret: profit left on the table vs an oracle that\n"
+            "picks the winner from day one (lower is better). Evidence: total "
+            "measurement bought: an even split measures at\n"
+            "full power, sending everyone to one arm measures nothing, and the sum "
+            "counts perfect-split epochs of data.\n"
+            f"The PINN loses {1 - pinn_regret / ts_regret:.0%} less than Thompson "
+            f"sampling on {pinn_info / ts_info:.0%} of the evidence."
         )
 
     fig, (ax_regret, ax_info) = plt.subplots(1, 2, figsize=(12, 3.6))
@@ -198,6 +209,7 @@ def arena(
 
 
 def arena_three() -> None:
+    """Render the three-arm arena to docs/arena_three_arm.png."""
     arena(
         study_path="data/frontier3a.pkl",
         out_path="docs/arena_three_arm.png",
@@ -214,16 +226,16 @@ def arena_three() -> None:
 
 def arena_drift() -> None:
     """
-    The drifting-world arena: the fixed drift entrants (drift_grid_fixed.pkl)
-    beside the static-net transplant from the original grid, restricted to
-    the reps both sweeps share so every bar plays the same tests. The worlds
-    were verified identical (paired TS old-vs-new differences are
-    statistically zero), which is what licenses mixing the two pickles.
+    The drifting-world arena: the fixed drift entrants (drift_grid_fixed.pkl) beside
+    the static-net transplant from the original grid, restricted to the reps both
+    sweeps share so every bar plays the same tests. Mixing the two pickles is licensed
+    by the worlds being identical: paired TS old-vs-new differences are zero.
     """
-    fixed = pickle.loads(open("data/drift_grid_fixed.pkl", "rb").read())
-    original = pickle.loads(open("data/drift_grid.pkl", "rb").read())
+    fixed = pickle.loads(Path("data/drift_grid_fixed.pkl").read_bytes())
+    original = pickle.loads(Path("data/drift_grid.pkl").read_bytes())
 
-    def drifting(study, wanted: str) -> dict[tuple, object]:
+    def drifting(study: object, wanted: str) -> dict[tuple, object]:
+        """One study's runs of a named drifting policy, keyed by the world they played."""
         return {
             tuple(r.delta): r for r in study.runs if r.policy == f"drifting/{wanted}"
         }
@@ -235,7 +247,7 @@ def arena_drift() -> None:
     kept["Pinn-static"] = drifting(original, "Pinn-twoarm")
     shared = set.intersection(*(set(runs) for runs in kept.values()))
 
-    merged = pickle.loads(open("data/drift_grid_fixed.pkl", "rb").read())
+    merged = pickle.loads(Path("data/drift_grid_fixed.pkl").read_bytes())
     merged.runs = []
 
     for name, runs in kept.items():
@@ -244,7 +256,8 @@ def arena_drift() -> None:
             # arena() normalizes by the literal name "ProbabilityMatching".
             run.policy = "ProbabilityMatching" if name == "TS-blind" else name
             merged.runs.append(run)
-    open("data/drift_grid_chart.pkl", "wb").write(pickle.dumps(merged))
+
+    Path("data/drift_grid_chart.pkl").write_bytes(pickle.dumps(merged))
 
     arena(
         study_path="data/drift_grid_chart.pkl",

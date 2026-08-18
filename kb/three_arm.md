@@ -805,7 +805,7 @@ blob already lives. Known issues, decreasing weight:
    the pairwise-basis toll at 1.30x a v1 step, dispatch-bound; expect the
    same class of cost. The base must be FROZEN — a co-trained base is v2's
    failure mode again, and the bound story dies with it. Freezing binds
-   the ceiling to the base checkpoint: swapping in a better two_arm later
+   the ceiling to the base model: swapping in a better two_arm later
    moves B under a trained correction, a retraining event, not a drop-in.
 5. Envelope for the correction: nu2 - B, giving the interpolation form
    u = (1 - r) B + r nu2 with r in [0, 1) the gated response — BOTH proven
@@ -926,7 +926,7 @@ If a curvature condition is graded again, grade THAT one.
   `violation` both exactly 0 with the ridge still satisfied at ~1e-11 (a
   sliver alive at m_b = 0 holds BC1 while everything the cloud samples is
   dead).
-- Checkpoints do not survive a gate change. Loading two-sided weights into
+- Model files do not survive a gate change. Loading two-sided weights into
   the anchored gate reinterprets the response entirely and produced
   `u/B = 0.123` and an arena regret of 123,639 -- both artifacts, not
   measurements.
@@ -1033,6 +1033,134 @@ positive residual. The fence would not move the bound. That also
 re-prices the fence itself: it was measured against a SQUARED residual, where
 those states carried 99.996% of the loss; the linear violation term de-weights
 them by four orders on its own.
+
+## 19. Implementation record
+
+Where the code's own reasons live, so the modules can point rather than carry
+them. Nothing here is new mathematics; sections 0-18 are the derivation.
+
+### 19.1 The response map, and why not tanh
+
+`u = envelope * y / (1 + y)` with `y = relu(r)^2` maps the response into
+`[0, 1)`, so `0 <= u < envelope` holds by construction: both proven properties
+are architectural rather than penalties.
+
+The squared relu is the free-boundary trick, the same one two_arm's
+`ExplorationPremium` carries. Committing all traffic to the leader observes no
+contrast, so `v = commit` solves the PDE exactly in the deep wedge and the true
+premium is exactly 0 there, pasting with `u = u_m = 0` and a jump only in the
+second derivative. `relu(r)^2` has exactly that regularity on the learned zero
+set of `r`; a plain clip has a first-derivative kink and breaks the smooth
+pasting.
+
+The envelope carries no correlation clamp: `k < 1` strictly on reachable
+states, and a clamp would kink `d(envelope)/d(tau_bc)` exactly where the corner
+needs it.
+
+Saturate rationally, NOT with `tanh(y)`: float32 `tanh` is exactly 1 beyond
+`r ~ 2.5` and its gradient underflows, a cliff with no way back. The first
+three_arm start died there, `r ~ 14` everywhere with only `log_scale` left
+trainable. `y / (1 + y)` saturates with a polynomial tail, so gradients survive
+any overshoot.
+
+### 19.2 The kink branch
+
+Parallel saturated `relu(.)^2` units added to the response: movable
+curvature-jump primitives for the free-boundary junction (the blob), which tanh
+ridges cannot synthesize cheaply. Each unit is `y / (1 + y)` with
+`y = relu(.)^2`, which keeps the curvature-jump regularity at the crease while
+bounding its output, so the branch is architecturally bad at painting the
+smooth bulk and cannot colonize it in from-scratch co-training. Observed
+2026-08-06 with bare `relu**2`: the branch outgrew the tanh stack early, took
+half the field, and scored 2 orders worse.
+
+The output layer is zero-init, so stitched onto a trained model the branch
+contributes exactly 0 at step 0 and training resumes from the model's
+function. Grafting is an explicit `stitch` call, as in both drift siblings:
+doing it inside `_load_from_state_dict` would make every load silently tolerate
+absent kink keys, including the ones absent by accident. The input bias starts at 0.5 for an alive start, the head-bias-1
+lesson one level down: a `relu**2` unit that is never active gets no gradient
+and never recovers, and default init left 3 of 8 dead (observed 2026-08-06).
+
+### 19.3 Feature conditioning at init
+
+Xavier assumes unit-variance inputs, and the raw feature stack breaks that by
+10-100x under the general sampling law, railing the first tanh layer: measured
+2026-08-05, 49% of units saturated, which is fatal for deep profiles whose
+later layers see only those units. A fixed per-feature scale is calibrated from
+the law once at init and kept as a buffer, so model files carry it.
+
+### 19.4 The concavity term
+
+The Hamiltonian is a quadratic on the simplex and must be concave, which is
+`L[f] >= 0` for EVERY contrast direction `f`, not only the three pair ones
+(derived 2026-08-08). Writing the direction at angle theta of the `(b, c)`
+tangent chart, `L[f] = f' M f` with `M = [[L_ab, h], [h, L_ac]]` and
+`h = (L_ab + L_ac - L_bc) / 2`; the pair directions are theta = 0 (`L_ab`),
+pi/2 (`L_ac`) and 3pi/4 (`L_bc / 2`). It is provable at the answer by the same
+mean-preserving-spread argument as pairwise positivity.
+
+Pairwise positivity alone misses ~3x of the violations: on the champion, 93.1%
+of states are pairwise-positive against 78.5% concave.
+
+SHIPPED FORM: `relu(-L[f])` along ONE freshly sampled direction per point per
+step. The direction is redrawn every step, so the population loss vanishes
+exactly on concavity, the same trick the collocation cloud plays with space.
+Linear in the learning numbers, so it is smooth everywhere and its gradient
+scale does not depend on their magnitude; linear rather than squared for the
+`pos_learning` reason, since the policy reads the SIGN. Sampled on the wedge's
+own chart, where the zero set is chart-invariant even though the angular
+weighting is not. Zero on the never-explore solution, since all three learning
+numbers vanish, so it neither breaks nor deepens that degeneracy.
+
+REJECTED: the `lambda_min` closed form of `M`. Its sqrt has a tie set that is
+the entire contact set, and the clamped version silently pays to un-flatten the
+dead region.
+
+SATURATION: `relu` is linear in depth and one deep point dominates, the worst
+carrying 7x the whole term's mean, so the term is `y / (s + y)`: bounded per
+point, linear below `s`, `1/y^2` above, and not `tanh`, whose float32 gradient
+underflows. The zero set is untouched. `CONCAVITY_SCALE` is that knee, set just
+above the median violation, so it wants lowering as the net converges.
+`CONCAVITY_WEIGHT` is calibrated on the MEDIAN pde over seven draws: a single
+draw put it at 730% of the equation.
+
+### 19.5 Slack pricing
+
+`SLACK_PRICE` is what one unit of slack costs as a share of the residual
+budget. The two sides are priced `(1 - SLACK_PRICE)` and `SLACK_PRICE` so they
+always sum to 1, which reallocates between them without rescaling the objective
+and keeps every weight calibrated against the residual valid across a sweep. It
+is the pinball loss at `q = 1 - SLACK_PRICE`: 0 is the pure subsolution
+objective, 0.5 the symmetric two-sided loss in L1, and above 0.5 is the wrong
+side for a lower bound.
+
+0 is the default because this problem's champion was polished at 0. 0.02 is for
+COLD STARTS: the climb is a global mean and cannot say WHERE to climb, so at 0 a
+from-scratch net sags below `V*` and inflates the learning number to buy free
+slack, as measured on two_arm, whose loss carries the table.
+
+### 19.6 Why a bad candidate cannot inflate the max
+
+Every one of section 10's seven candidates is evaluated through `H` at a point
+clamped into the triangle, so each evaluation is a valid LOWER bound on the true
+max: a degraded candidate gives a poor bound and loses the argmax rather than
+inflating the answer. Where the interior solve degrades (`det ~ 0`, a parabolic
+cylinder) the true max sits on the boundary, served by candidates that never
+touch `det`. Selection is by gather, whose backward zeroes every unselected row,
+so ill-conditioned gradients in the losing candidates never reach the
+parameters.
+
+### 19.7 The fold self-check runs in float64
+
+`det T` is preserved because the relabels are congruences by permutation
+matrices. That is exact algebra, so the check runs in float64. In float32 the
+fold's own pair-coordinate reassembly cancels (`tau_bb + tau_bc` is
+`precision_ab`, a difference of similar numbers when `precision_bc` dominates)
+and `det` then floors at `PRIOR_FLOOR^2 = 1e-6` against O(1) products, leaving
+about one significant digit. At `rtol=1e-4` in float32 the assert fails on ~7%
+of unseeded Sobol scrambles, silently, because the scramble is drawn from the
+global rng at import.
 
 ## To come
 

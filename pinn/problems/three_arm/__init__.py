@@ -11,18 +11,31 @@ The objective maximizes the premium subject to `v <= max H` since 2026-08-16
 rather than a two-sided fit.
 """
 
-from .loss import (
-    control_tie_loss,
-    draw,
-    loss,
-    objective,
-    subsolution_loss,
-    treatment_tie_loss,
-)
-from .model import (
-    DimensionlessValueFunction,
-    init_model,
-    ExplorationPremium,
-    ValueFunction,
-)
-from .sample import RidgeSample, Sample
+from torch import Tensor
+
+from ...net import DimensionlessValue
+from ...train import Objective
+from ..problem import Problem
+from .loss import draw, loss, objective
+from .model import DimensionlessValueFunction, init_model
+
+
+class ThreeArm(Problem):
+    """The A/B/C-test problem: kb/three_arm.md."""
+
+    name = "three_arm"
+    net = DimensionlessValueFunction
+
+    def init_model(
+        self, state: dict | None = None, topology: str | None = None
+    ) -> DimensionlessValueFunction:
+        return init_model(state, topology)
+
+    def objective(self, batch: int = 1024, device: str = "cpu") -> Objective:
+        return objective(batch, device)
+
+    def draw(self, batch: int, device: str = "cpu") -> tuple:
+        return draw(batch, device)
+
+    def loss(self, value: DimensionlessValue, *args: object) -> Tensor:
+        return loss(value, *args)

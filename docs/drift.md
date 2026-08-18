@@ -149,6 +149,26 @@ None of this is a separate model. `etahat` goes into the network as one more
 input feature, `log1p(2 etahat tauhat)`, the ratio of your precision to the
 ceiling, which is exactly 0 when `etahat = 0`; and the envelope the premium is
 built against collapses onto the static one bitwise there, by `torch.equal`
-rather than by tolerance. One trained checkpoint therefore covers every drift
+rather than by tolerance. One trained model therefore covers every drift
 regime, and the world you started in, where the funnel narrows forever and every
 test ends exactly once, is the `etahat = 0` slice of it.
+
+## Running it
+
+The trained drift model is a release asset, so nothing here needs training:
+
+```python
+import torch
+
+from pinn.release import load
+
+# rho discounts one observation, sigma scales its noise, eta is the drift rate
+# of the effect itself. The same net serves every eta.
+value = load("two_arm_drift").bind(rho=0.001, sigma=50.0, eta=1e-3)
+
+# Treatment leads by 1.0 at precision 0.1: the share of traffic it gets now.
+value.policy(torch.tensor([1.0]), torch.tensor([0.1]))
+```
+
+`load` reads the asset off the latest release and caches it under
+`torch.hub.get_dir()`. Pass `tag="anscombe"` to pin one release instead.

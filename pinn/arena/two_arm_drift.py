@@ -1,23 +1,12 @@
 """
-The two-arm problem with a drifting mean in the arena: effect draw, drift,
-observation model, and the policy zoo.
+The two-arm problem with a drifting mean in the arena: effect draw, drift, observation
+model, and the policy zoo.
 
-ONE zoo, not two. Every policy carries its own `sigma` and `eta` as POLICY
-parameters, so drift-blind is simply `eta = 0` and there is no separate
-drift-unaware class to keep in step. `init` ties them to the environment's --
-the correctly-specified case -- and direct construction unties them, which is
-how the misspecification grid is swept (same pattern as ExploreThenCommit's
-`deadline`).
-
-The grid that motivates the split:
-
-    eta_policy    = 0 < eta        the cost of ignoring real drift
-    eta_policy    > eta = 0        the premium for insuring against none
-    sigma_policy != sigma          the cost of misjudging the noise
-
-with eta = eta_policy = 0 and sigma_policy = sigma reproducing the two_arm
-arena exactly -- Pinn included since 2026-08-09, when the prior fold was
-restored to the filter (see Pinn's docstring for what the flat start cost).
+**One** zoo, not two. Every policy carries its own `sigma` and `eta` as *policy*
+parameters, so drift-blind is simply `eta = 0`, `init` ties them to the environment's,
+and direct construction unties them to sweep the misspecification grid. At
+`eta = eta_policy = 0` and `sigma_policy = sigma` this reproduces the two_arm arena
+exactly, Pinn included, which the demo asserts. kb/arena_results.md has the grid.
 """
 
 from __future__ import annotations
@@ -30,40 +19,29 @@ from pathlib import Path
 from torch import Tensor
 from typing import Self
 
-from ..problems.two_arm_drift import DimensionlessValueFunction, ValueFunction
+from ..problems.two_arm_drift.model import DimensionlessValueFunction, ValueFunction
 from .harness import Params, Policy, Run, Runner, optimal_deadline
 
 CHECKPOINT = Path("data") / "two_arm_drift.pt"
+"""The champion the Pinn policy plays, repo-root relative like every other data path."""
 
-# The weakest prior the champion is trusted at, in dimensionless precision.
-# 1e-3, the sampler's own PRIOR_FLOOR, so the guard no longer clamps inside
-# the training support at all.
-#
-# It was 1e-2 until 2026-08-13, guarding a low-tauhat corner where L_ab went
-# negative at the ridge and the policy committed on no evidence. That corner
-# is gone: the champion of that date satisfies pairwise positivity on 100.0%
-# of states and full concavity on 99.9%. Re-measured on the CURRENT drift
-# champion, 3000 paired reps at production parameters, loosening 1e-2 -> 1e-3
-# CUT harsh-drift regret by 62% (-38,753 +/- 3,591) and bought 3.6x the
-# evidence, and changed nothing in the deployment world (+361 +/- 601, a CI
-# covering zero). The 2026-08-10 measurement that made 1e-2 load-bearing said
-# the opposite on both counts; it was taken against a checkpoint since
-# replaced by one 39x better, and the crutch had become the injury.
 _FLATTEST_TAUHAT = 1e-3
+"""
+The weakest prior the champion is trusted at, in dimensionless precision: the
+sampler's own PRIOR_FLOOR, so the guard does not clamp inside the training support.
+Measured 2026-08-13, and re-measure it whenever the champion changes
+(kb/arena_results.md, the prior floor).
+"""
 
 
 @cache
 def _champion() -> DimensionlessValueFunction:
-    """
-    One load per process; read-only sharing, nothing here trains.
-    """
+    """One load per process; read-only sharing, since nothing here trains."""
     return DimensionlessValueFunction.load(CHECKPOINT)
 
 
 def draw_effect(runner: Runner) -> Tensor:
-    """
-    The environment's truth at epoch 0: (0, delta), one row per rep.
-    """
+    """The environment's truth at epoch 0: (0, delta), one row per rep."""
     delta = runner.normal(runner.params.effect, runner.params.effect_std)
 
     return torch.stack((torch.zeros_like(delta), delta), dim=1).float()
@@ -71,13 +49,10 @@ def draw_effect(runner: Runner) -> Tensor:
 
 def advance(runner: Runner, deltas: Tensor) -> Tensor:
     """
-    One epoch of drift on the contrast. Control is the reference and stays at
-    0 by definition, so the whole random walk lands on the treatment arm.
-
-    Unconditional: at eta = 0 the draw is N(0, 0) = 0 and the world is static,
-    which is the point -- the runner has no static/drifting branch. It does
-    consume one variate per epoch either way, so this zoo's noise stream is
-    its own; do not compare run-for-run against two_arm's.
+    One epoch of drift on the contrast. Control is the reference and stays at 0, so the
+    whole random walk lands on the treatment arm. Unconditional, so nothing branches on
+    drift, which costs one variate per epoch either way: this zoo's noise stream is its
+    own and is not comparable run-for-run against two_arm's.
     """
     drift = runner.normal(0.0, runner.params.eta)
 
@@ -90,19 +65,10 @@ def observe(
     runner: Runner, allocation: Tensor, deltas: Tensor
 ) -> tuple[Tensor, Tensor]:
     """
-    One epoch's evidence: the noisy contrast estimate, and the DESIGN
-    alpha_0 alpha_1 that bought it.
-
-    The design, not the precision. Precision is alpha_0 alpha_1 / sigma^2, and
-    that sigma is the policy's belief, not the environment's -- handing over a
-    precision computed with the true sigma is what tied the two together in
-    the two_arm zoo. The environment supplies how much design information was
-    bought and a draw at the true noise; the policy supplies the scale it
-    thinks that noise has.
-
-    A vertex rep buys nothing: it consumes no draw (the mask skips its
-    cursor) and reads (0, 0), which the precision-weighted update multiplies
-    away.
+    One epoch's evidence: the noisy contrast estimate, and the *design* alpha_0 alpha_1
+    that bought it. The design, not the precision, because precision divides by a sigma
+    the policy owns rather than the environment: here the environment supplies the
+    design and a draw at the true noise. A vertex rep buys nothing and reads (0, 0).
     """
     design = (allocation[:, 0] * allocation[:, 1]).double()
     live = design > 0.0
@@ -112,20 +78,19 @@ def observe(
 
 
 def _split(treatment: Tensor) -> Tensor:
+    """A treatment share as a (reps, 2) simplex row."""
     return torch.stack((1.0 - treatment, treatment), dim=1).float()
 
 
 class Filter(Policy):
     """
-    Kalman posterior on a drifting contrast, carried as (mean, precision),
-    both (reps,) float64.
+    Kalman posterior on a drifting contrast, carried as (mean, precision), both
+    (reps,) float64.
 
-    Not two_arm's running sums: those are sufficient statistics only under a
-    flat prior with perfect memory, and drift forgets. The recursion is
-    forecast-then-update, and at eta = 0 it reduces to the same numbers.
-
-    `sigma` and `eta` are POLICY parameters. `init` sets them to the truth;
-    construct directly to misspecify either.
+    Not two_arm's running sums: those are sufficient statistics only under a flat prior
+    with perfect memory, and drift forgets. The recursion is forecast-then-update, and
+    at eta = 0 it reduces to the same numbers. `sigma` and `eta` are *policy*
+    parameters, set to the truth by `init` and misspecified by constructing directly.
     """
 
     def __init__(
@@ -164,22 +129,21 @@ class Filter(Policy):
 
     @property
     def z(self) -> Tensor:
+        """The posterior mean in posterior-standard-deviation units."""
         return self.mean * self.precision.sqrt()
 
     @property
     def prob_positive(self) -> Tensor:
-        """
-        P(delta > 0) under the posterior.
-        """
+        """P(delta > 0) under the posterior."""
         return 0.5 * torch.special.erfc(-self.z / sqrt(2.0))
 
 
 class ExploreThenCommit(Filter):
     """
     Explore at the most informative allocation, then commit on the sign of the
-    estimate at a fixed deadline. Under drift the commitment is permanent
-    anyway -- the policy stops looking -- which is exactly the failure the
-    drift-aware entrants should exploit.
+    estimate at a fixed deadline. Under drift the commitment is permanent anyway
+    (the policy stops looking), which is exactly the failure the drift-aware entrants
+    should exploit.
     """
 
     def __init__(
@@ -216,8 +180,8 @@ class ProbabilityMatching(Filter):
     """
     Allocate the posterior probability that treatment wins: Thompson sampling
     in its two-arm closed form. With eta > 0 the posterior stops sharpening at
-    the ceiling, so this keeps a permanent sliver on the loser instead of
-    saturating -- it never reaches a vertex and never commits.
+    the ceiling, so this keeps a permanent sliver on the loser instead of saturating:
+    it never reaches a vertex and never commits.
     """
 
     def propose(self) -> Tensor:
@@ -232,9 +196,11 @@ class ZTest(Filter):
     """
 
     p_value: float = 0.05
+    """Two-sided nominal level the null is tested at, every epoch."""
 
     @cached_property
     def threshold(self) -> float:
+        """The |z| that rejects at `p_value`, two-sided."""
         return float(torch.special.ndtri(torch.tensor(1.0 - self.p_value / 2.0)))
 
     def propose(self) -> Tensor:
@@ -248,8 +214,8 @@ class Pinn(Filter):
     The trained drift HJB policy, mapped onto arena units with rate
     gamma = 1 - rho (exact is -log rho, O(gamma^2) apart).
 
-    Its etahat is the POLICY's eta, so one checkpoint plays every column of the
-    misspecification grid -- that is what carrying etahat as a net input buys.
+    Its etahat is the *policy's* eta, so one checkpoint plays every column of the
+    misspecification grid, which is what carrying etahat as a net input buys.
     """
 
     def __init__(
@@ -268,6 +234,7 @@ class Pinn(Filter):
 
     @property
     def prior_tau(self) -> float:
+        """The prior precision the filter starts at, in arena units."""
         if self.prior_std is not None:
             return 1.0 / self.prior_std**2
 
@@ -286,8 +253,8 @@ class Pinn(Filter):
         return policy
 
     def propose(self) -> Tensor:
-        # The trust guard on the net INPUT only: erosion can pull the eroded
-        # prior below the flattest tauhat the checkpoint supports.
+        # The trust guard on the net *input* only: erosion can pull the eroded prior
+        # below the flattest tauhat the checkpoint supports.
         floor = _FLATTEST_TAUHAT / ((1.0 - self.params.rho) * self.sigma**2)
         tau = self.precision.clamp_min(floor)
 
@@ -295,6 +262,7 @@ class Pinn(Filter):
 
 
 def demo() -> None:
+    """At eta = 0 this zoo is two_arm's, and with drift the filter stops sharpening."""
     import pinn.arena.two_arm_drift as problem
 
     static = Params(
@@ -356,20 +324,18 @@ def demo() -> None:
     blind_precision = float(blind.precision[0])
     assert blind_precision > 5.0 * aware_precision, (blind_precision, aware_precision)
 
-    # It converges to the recursion's own fixed point: tau = tau/(1 + eta^2 tau)
-    # + p solves to p/2 + sqrt(p^2/4 + p/eta^2). That sits just ABOVE the
-    # continuous ceiling sqrt(p)/eta = 1/(2 sigma eta), by the half-lump p/2 --
-    # the discrete filter adds a whole epoch of information after the decay
-    # where continuous time interleaves the two.
+    # The recursion's own fixed point: tau = tau/(1 + eta^2 tau) + p solves to
+    # p/2 + sqrt(p^2/4 + p/eta^2), which sits a half-lump p/2 *above* the continuous
+    # ceiling sqrt(p)/eta, the discrete filter adding a whole epoch after the decay.
     gained, drift = 0.25, 0.05
     fixed_point = gained / 2.0 + sqrt(gained**2 / 4.0 + gained / drift**2)
 
     assert abs(aware_precision - fixed_point) < 1e-6, (aware_precision, fixed_point)
     assert fixed_point > 1.0 / (2.0 * 1.0 * drift)
 
-    # The prior fold: at eta = 0 the Pinn filter carries exactly two_arm's
-    # conjugate posterior -- same shrunk mean, same precision. sigma = 1, where
-    # the two zoos' observation conventions (design vs precision) coincide.
+    # The prior fold: at eta = 0 the Pinn filter carries exactly two_arm's conjugate
+    # posterior, same shrunk mean and same precision. sigma = 1, where the two zoos'
+    # observation conventions (design vs precision) coincide.
     from .two_arm import _FLATTEST_TAUHAT as TWO_ARM_FLATTEST, Pinn as TwoArmPinn
 
     assert TWO_ARM_FLATTEST == _FLATTEST_TAUHAT

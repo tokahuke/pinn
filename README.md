@@ -61,7 +61,7 @@ A quick map of the repo, for the curious:
   two problems in a world where the effects themselves drift, so yesterday's
   evidence decays and a committed decision can become wrong on its own. One
   extra parameter, no extra state: the drift rate is a network input, so a
-  single checkpoint serves every drift regime, and it reduces to the static
+  single model serves every drift regime, and it reduces to the static
   problem exactly when the drift is zero. Maths in `kb/two_arm_drift.md` and
   `kb/three_arm_drift.md`.
 - `pinn/arena`: the policy shoot-out. An N-arm regret harness, the baseline
@@ -69,18 +69,26 @@ A quick map of the repo, for the curious:
   entrant. Run it with `poetry run arena simulate ...` and then
   `poetry run arena analyze ...`.
 - `pinn/cli`: the `pinn` command, one module per subcommand — `init` to
-  create an untrained checkpoint, `train` to train it, `plot` and `validate`
+  create an untrained model, `train` to train it, `plot` and `validate`
   for two-arm diagnostics.
+- `pinn/release.py`: `load("two_arm")` pulls a released net off GitHub and
+  caches it, so running one needs no training and no `data/` folder. Bind it
+  to your experiment and it becomes a working model.
 - `jobq`: rent a GPU, train on it, get the results back. `jobq up` creates a
   RunPod pod and pushes the repo, `jobq run` executes there with the output
   streaming to your terminal, `jobq backup` mirrors results down as they are
   written, `jobq down` fetches everything and destroys the pod. Entirely
   optional — nothing in the repo needs it.
 
-Checkpoints live in the gitignored `data/`, named `<problem>.<topology>.pt`,
-with the bare `<problem>.pt` a symlink at whichever currently wins. So
-`ls -l data/` reads as a leaderboard, and promoting a challenger is one
-`ln -sf` that every command and snippet here picks up.
+Getting a trained model takes one call, and no training: `pinn.release.load`
+pulls the current champion for a problem from the latest GitHub release and
+caches it under `torch.hub.get_dir()`. The snippet at the end of this page is
+the whole story.
+
+`data/` is for models you train yourself. It is gitignored, the files are named
+`<problem>.<topology>.pt`, and the bare `<problem>.pt` is a symlink at whichever
+currently wins. So `ls -l data/` reads as a leaderboard, and promoting a
+challenger is one `ln -sf` that every command and snippet here picks up.
 
 ## Quickstart
 
@@ -99,25 +107,25 @@ poetry run arena simulate data/study.pkl --problem three_arm \
 poetry run arena analyze data/study.pkl
 ```
 
-To use a trained two-arm model in your own code, load it from disk, tell it
-your economics, and ask for the split:
+To use a trained two-arm model in your own code, load one from the latest
+release, tell it your rates, and ask for the split:
 
 ```python
 import torch
-from pinn.problems.two_arm import DimensionlessValueFunction, ValueFunction
+from pinn.release import load
 
-# Your experiment's economics: sigma is the noise scale of one observation,
+# load() downloads once and caches under torch.hub.get_dir(); add
+# tag="anscombe" to pin a release instead of taking the latest. What it
+# returns is dimensionless and inert until it is bound.
+#
+# Your experiment's rates: sigma is the noise scale of one observation,
 # rho the discount rate per observation (how impatient you are).
-value = ValueFunction(
-    DimensionlessValueFunction.load("data/two_arm.pt"),
-    rho=0.001,
-    sigma=50.0,
-)
+value = load("two_arm").bind(rho=0.001, sigma=50.0)
 
 # Current posterior: treatment leads by mu = 1.0 with precision tau = 0.1
 # (standard deviation ~3.2). The policy returns the share of traffic to
 # send to treatment right now.
-value.policy(torch.tensor([1.0]), torch.tensor([0.1]))   # 0.69: lean in, keep testing
+value.policy(torch.tensor([1.0]), torch.tensor([0.1]))   # 0.68: lean in, keep testing
 value.policy(torch.tensor([3.0]), torch.tensor([0.25]))  # 1.00: commit, stop testing
 ```
 
@@ -137,13 +145,13 @@ http://www.apache.org/licenses/LICENSE-2.0 (also included in
 [LICENSE](LICENSE)).
 
 Unless required by applicable law or agreed to in writing, the software and
-the trained model checkpoints published as release assets are distributed on
+the trained models published as release assets are distributed on
 an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either
 express or implied, including without limitation any warranty of
 merchantability, fitness for a particular purpose, or non-infringement. In
 no event shall the authors or copyright holders be liable for any claim,
 damages, or other liability arising from the use of this software or the
-published model checkpoints, including decisions made or actions taken by
+published models, including decisions made or actions taken by
 systems that incorporate them. See the License for the specific language
 governing permissions and limitations.
 

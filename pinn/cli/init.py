@@ -7,15 +7,17 @@ from __future__ import annotations
 import click
 import torch
 
-from importlib import import_module
 from pathlib import Path
 
-from ..problems import PROBLEMS
+from ..problems import Problem
 
 
 @click.command(name="init")
 @click.option(
-    "--problem", type=click.Choice(PROBLEMS), required=True, help="Which problem."
+    "--problem",
+    type=click.Choice(Problem.names()),
+    required=True,
+    help="Which problem.",
 )
 @click.option(
     "--out",
@@ -41,23 +43,18 @@ def init(
     problem: str, out_path: Path, topology: str | None, from_path: Path | None
 ) -> None:
     """
-    Create an untrained checkpoint, fresh or adapted from another.
-
-    At least one of --topology and --from. Given both, --topology is the target
-    shape and --from the source adapted into it -- which is how a kink branch
-    is grafted onto a trained smooth net. Reading the file is this command's
-    job; the problem module is handed the state dict and decides what it means
-    -- for two_arm_drift a two_arm checkpoint stitches in as the etahat = 0
-    slice, for three_arm a kinked state keeps its kinks.
+    Create an untrained checkpoint, fresh or adapted from another. At least one of
+    --topology and --from; given both, --topology is the target shape and --from the
+    source adapted into it, which is how a kink branch is grafted onto a trained smooth
+    net. Reading the file is this command's job, the problem decides what it means.
     """
     if topology is None and from_path is None:
         raise click.UsageError("pass at least one of --topology and --from")
 
-    module = import_module(f"pinn.problems.{problem}")
     state = torch.load(from_path) if from_path is not None else None
 
     try:
-        value = module.init_model(state=state, topology=topology)
+        value = Problem.named(problem).init_model(state=state, topology=topology)
     except ValueError as bad:
         raise click.UsageError(str(bad)) from bad
 
@@ -69,6 +66,6 @@ def init(
             f"from {from_path}" if from_path is not None else "",
             f"topology {topology}" if topology is not None else "",
         )
-        if part
+        if part != ""
     )
     click.echo(f"initialised {problem} {source} -> {out_path}")

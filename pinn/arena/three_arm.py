@@ -15,31 +15,25 @@ from pathlib import Path
 from torch import Tensor
 from typing import Self
 
-from ..problems.three_arm import DimensionlessValueFunction, ValueFunction
+from ..problems.three_arm.model import DimensionlessValueFunction, ValueFunction
 from ..utils.gaussian import _bivariate_ndtr
 from .harness import Params, Policy, Runner, optimal_deadline
 
 CHECKPOINT = Path("data") / "three_arm.pt"
+"""The champion the Pinn policy plays, repo-root relative like every other data path."""
 
-# The weakest prior the champion is trusted at, in dimensionless precision.
-# 1e-3, the sampler's own PRIOR_FLOOR, so the guard no longer clamps inside
-# the training support at all.
-#
-# It was 1e-2 until 2026-08-13, guarding a low-tauhat corner where L_ab went
-# negative at the ridge and the policy committed on no evidence. That corner
-# is gone: the champion of that date satisfies pairwise positivity on 100.0%
-# of states and full concavity on 99.9%. Re-measured on the CURRENT drift
-# champion, 3000 paired reps at production parameters, loosening 1e-2 -> 1e-3
-# CUT harsh-drift regret by 62% (-38,753 +/- 3,591) and bought 3.6x the
-# evidence, and changed nothing in the deployment world (+361 +/- 601, a CI
-# covering zero). The 2026-08-10 measurement that made 1e-2 load-bearing said
-# the opposite on both counts; it was taken against a checkpoint since
-# replaced by one 39x better, and the crutch had become the injury.
 _FLATTEST_TAUHAT = 1e-3
+"""
+The weakest prior the champion is trusted at, in dimensionless precision: the
+sampler's own PRIOR_FLOOR, so the guard does not clamp inside the training support.
+Measured 2026-08-13, and re-measure it whenever the champion changes
+(kb/arena_results.md, the prior floor).
+"""
 
 
 @cache
 def _champion() -> DimensionlessValueFunction:
+    """One load per process; read-only sharing, since nothing here trains."""
     return DimensionlessValueFunction.load(CHECKPOINT)
 
 
@@ -80,13 +74,10 @@ def observe(
     runner: Runner, allocation: Tensor, deltas: Tensor
 ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
     """
-    One epoch's evidence in information form: dq = G delta + noise with
-    noise ~ N(0, G), plus the precision increment G itself -- the natural
-    parameters, so no inversion of a possibly singular G is ever needed
-    (an edge allocation is rank one, a vertex rank zero).
-
-    A vertex rep buys nothing: it consumes no draws (the mask skips its
-    cursor twice, keeping the stream aligned across batches) and reads zeros.
+    One epoch's evidence in information form: dq = G delta + noise with noise ~ N(0, G),
+    plus the precision increment G itself. Natural parameters, so a possibly singular G
+    is never inverted (an edge allocation is rank one, a vertex rank zero). A vertex rep
+    buys nothing: no draws consumed, zeros read.
     """
     g_bb, g_bc, g_cc = _rates(allocation, runner.params.sigma)
     live = ~((g_bb == 0.0) & (g_cc == 0.0))
@@ -142,6 +133,7 @@ class Bayesian(Policy):
 
     @property
     def determinant(self) -> Tensor:
+        """det T, which is 0 until the data precision is invertible."""
         return self.t_bb * self.t_cc - self.t_bc**2
 
     def mean(self) -> tuple[Tensor, Tensor]:
@@ -161,6 +153,7 @@ class Bayesian(Policy):
 
 
 def _one_hot(arm: Tensor) -> Tensor:
+    """An arm index per rep as a (reps, 3) vertex row."""
     return torch.eye(3, device=arm.device)[arm]
 
 
@@ -176,6 +169,7 @@ def _commit_arm(m_b: Tensor, m_c: Tensor) -> Tensor:
 
 
 def _thirds(reps: int, device: torch.device) -> Tensor:
+    """The uniform allocation, which is the most informative one."""
     return torch.full((reps, 3), 1.0 / 3.0, device=device)
 
 
@@ -224,6 +218,7 @@ class ProbabilityMatching(Bayesian):
         def orthant(
             mean_x: Tensor, var_x: Tensor, mean_y: Tensor, var_y: Tensor, cov: Tensor
         ) -> Tensor:
+            """P(both positive) for a Gaussian pair, from its moments."""
             correlation = cov / (var_x * var_y) ** 0.5
 
             return _bivariate_ndtr(
@@ -255,11 +250,12 @@ class Elimination(Bayesian):
     Successive elimination, the z-test's three-arm analog (ported from the
     posterior-space benchmark): split evenly among surviving arms, drop any
     arm pairwise-significantly worse at `p_value`, commit when one survives.
-    Stateless in the eliminations -- every epoch retests from the accumulated
-    data, so the peeking caveat of the two-arm ZTest applies squared.
+    Stateless in the eliminations: every epoch retests from the accumulated data, so
+    the peeking caveat of the two-arm ZTest applies squared.
     """
 
     p_value: float = 0.05
+    """Two-sided nominal level each pairwise comparison is tested at, every epoch."""
 
     def propose(self) -> Tensor:
         det = self.determinant
@@ -299,10 +295,10 @@ class Pinn(Bayesian):
     The trained three_arm HJB policy, mapped onto arena units with rate
     gamma = 1 - rho; commits are exact vertices of the simplex max.
 
-    The prior is a POLICY PARAMETER: prior_std is the prior standard
-    deviation on each contrast, in arena units, realized as the arm-symmetric
-    prior (off-diagonal -1/2, today's "correlated" convention). None means
-    the flattest prior the checkpoint supports, computed per environment.
+    The prior is a **policy parameter**: prior_std is the prior standard deviation on
+    each contrast, in arena units, realized as the arm-symmetric prior (off-diagonal
+    -1/2, today's "correlated" convention). None means the flattest prior the
+    checkpoint supports, computed per environment.
     """
 
     def __init__(
@@ -349,6 +345,7 @@ class Pinn(Bayesian):
 
 
 def demo() -> None:
+    """Each policy reaches the border its docstring claims, on a clear winner."""
     import pinn.arena.three_arm as problem
 
     from .harness import Run
@@ -384,7 +381,10 @@ def demo() -> None:
 
     # The PINN: opens near thirds on no evidence, commits to the winner.
     pinn_policy = Pinn.init(params, 1, "cpu")
-    assert float(pinn_policy.propose().min()) > 0.2, pinn_policy.propose()
+    # Not thirds since the 2026-08-16 subsolution champion, which opens
+    # [0.4463, 0.3760, 0.1778]. What this guards is that no arm is abandoned
+    # at the flat prior.
+    assert float(pinn_policy.propose().min()) > 0.1, pinn_policy.propose()
 
     pinn = play(Pinn, b_wins)
     assert pinn.committed == 1, (pinn.committed, pinn.final_allocation)

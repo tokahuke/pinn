@@ -8,37 +8,30 @@ from __future__ import annotations
 
 import click
 import pickle
-
 import sys
 import torch
 
+from collections.abc import Callable, Iterator
 from importlib import import_module
 from inspect import isabstract
 from pathlib import Path
-from typing import Iterator
 
 from .harness import Params, Policy, Run, Runner, Study
 
-# Reps per batched chunk: caps the noise buffer (~120 MB at the production horizon)
-# and keeps the progress line moving.
 CHUNK = 4096
+"""Reps per batched chunk, which is what caps the noise buffer."""
 
 
 def concrete_policies(cls: type[Policy] = Policy) -> Iterator[type[Policy]]:
     """
-    Every instantiable Policy at any depth. __subclasses__ only sees direct
-    children, and the intermediates (the Bayesian bases) are abstract.
+    Every instantiable Policy at any depth, the intermediates being abstract.
 
-    The caller MUST filter by module. This used to rely on only the chosen
-    problem being imported, which stopped being true when three_arm_drift
-    began reusing three_arm's policies: importing it registers both zoos, and
-    a sweep silently ran eleven classes for a four-policy problem, two of them
-    named Pinn, which the paired report then refused to align.
+    The caller **must** filter by module: a drifting zoo imports its static sibling, so
+    reaching either registers both and an unfiltered sweep runs two classes named Pinn.
     """
-    # DEDUPED: a drifting zoo's policy inherits from both the static policy
-    # and the drifting filter, so the recursion reaches it down two paths and
-    # would otherwise run it twice -- which is exactly what happened, and the
-    # doubled runs then failed to align against the singly-run Pinn.
+    # Deduped: a drifting zoo's policy inherits from both the static policy and the
+    # drifting filter, so the recursion reaches it down two paths and would otherwise
+    # yield it twice.
     seen = []
 
     for sub in cls.__subclasses__():
@@ -47,14 +40,14 @@ def concrete_policies(cls: type[Policy] = Policy) -> Iterator[type[Policy]]:
                 seen.append(found)
                 yield found
 
-        if not isabstract(sub) and sub not in seen:
+        if isabstract(sub) is False and sub not in seen:
             seen.append(sub)
             yield sub
 
 
 @click.group()
 def cli() -> None:
-    pass
+    """Simulate a policy sweep, then report it."""
 
 
 @cli.command()
@@ -104,6 +97,10 @@ def simulate(
     workers: int | None,
     device: str,
 ) -> None:
+    """
+    Sweep every policy of the chosen problem against one drawn environment, and pickle
+    the Study for `analyze`.
+    """
     if workers is not None:
         torch.set_num_threads(workers)
 
@@ -117,13 +114,9 @@ def simulate(
         size=size,
         eta=eta,
     )
-    # Vectorized over reps, chunked to bound memory. Seeded by REP: every
-    # policy sees the same per-rep noise stream (until allocations diverge),
-    # so cross-policy comparisons are paired -- and a rep's stream is
-    # independent of its chunk, so chunking does not move any number.
-    # A drifting zoo walks the truth as well as observing it, so it eats
-    # more of each rep's stream; the default keeps the static zoos byte-
-    # identical to every number already recorded.
+    # Seeded by *rep*, so cross-policy comparisons are paired and a rep's stream is
+    # independent of its chunk. A drifting zoo eats more of that stream, which is why
+    # it declares its own appetite (kb/arena_results.md, harness invariants).
     appetite = getattr(module, "DRAWS_PER_EPOCH", 2)
     classes = [c for c in concrete_policies() if c.__module__ == module.__name__]
     results: list[Run] = []
@@ -146,14 +139,8 @@ def simulate(
 def analyze(runs: Path) -> None:
     """
     The report table: per policy, mean regret with 95% CI, ratio vs the best,
-    wrong-commit share, commit share, and the median commit epoch.
-
-    CAVEAT under drift: `wrong%` scores the committed arm against `delta`,
-    which is the effect at epoch 0. When eta > 0 the truth moves afterwards, so
-    this reads "committed against the arm that was best when the run started",
-    not "against the arm that was best while committed". The honest drift
-    metric is the regret column, which is measured per epoch against the
-    moving oracle.
+    wrong-commit share, commit share, and the median commit epoch. Under drift read
+    regret, not `wrong%` (kb/arena_results.md, reading the report).
     """
     study: Study = pickle.loads(runs.read_bytes())
     by_policy: dict[str, list[Run]] = {}
@@ -162,6 +149,7 @@ def analyze(runs: Path) -> None:
         by_policy.setdefault(run.policy, []).append(run)
 
     def mean_ci(values: list[float]) -> tuple[float, float]:
+        """The mean and its 95% half-width, normal approximation."""
         mean = sum(values) / len(values)
         variance = sum((v - mean) ** 2 for v in values) / max(len(values) - 1, 1)
 
@@ -181,12 +169,11 @@ def analyze(runs: Path) -> None:
         mean, ci = mean_ci([r.regret for r in runs_])
         committed = [r for r in runs_ if r.committed is not None]
         wrong = [r for r in committed if r.delta[r.committed] < max(r.delta)]
-        # committed_at, not epochs: the runner plays the full horizon now, so
-        # epochs is the horizon for every run and says nothing about commitment.
-        # Old studies predate the field; their runs read as None and are
-        # dropped from the median, like precision_time below.
+        # committed_at, not epochs: the runner plays the full horizon, so epochs says
+        # nothing about commitment. Studies predating the field read as None and drop
+        # out of the median, like precision_time below.
         epochs = sorted(r.committed_at for r in committed if r.committed_at is not None)
-        median = epochs[len(epochs) // 2] if epochs else None
+        median = epochs[len(epochs) // 2] if len(epochs) > 0 else None
         # Old studies predate the field; they read as 0.
         info, info_ci = mean_ci([getattr(r, "precision_time", 0.0) for r in runs_])
         print(
@@ -200,20 +187,15 @@ def analyze(runs: Path) -> None:
     _paired(by_policy, mean_ci)
 
 
-def _paired(by_policy: dict[str, list[Run]], mean_ci) -> None:
+def _paired(
+    by_policy: dict[str, list[Run]],
+    mean_ci: Callable[[list[float]], tuple[float, float]],
+) -> None:
     """
-    The same comparison, paired by rep.
-
-    Every policy plays the SAME drawn effects and the same noise, so the
-    difference in regret on one rep cancels the environment -- which is nearly
-    all of the variance. Comparing the unpaired means throws that away and
-    reports a confidence interval dominated by how hard the draws were, not by
-    how the policies differ.
-
-    Prints what the pairing costs to buy: the reps needed for a 2-sigma read on
-    a 2% effect, which is how the NEXT sweep should be sized. Sizing from the
-    unpaired spread is how a 50k sweep gets run to resolve something a few
-    thousand paired reps would have settled.
+    The same comparison, paired by rep, which is the one to read: the per-rep
+    difference cancels the environment, and that is nearly all of the variance. Also
+    prints the reps needed for a 2-sigma read on a 2% effect, which is how the *next*
+    sweep should be sized (kb/arena_results.md, reading the report).
     """
     ranked = sorted(
         by_policy.items(), key=lambda item: mean_ci([r.regret for r in item[1]])[0]
@@ -231,7 +213,7 @@ def _paired(by_policy: dict[str, list[Run]], mean_ci) -> None:
         if len(runs_) != len(best_runs) or any(
             a.delta != b.delta for a, b in zip(runs_, best_runs)
         ):
-            print(f"{name:<22} {'reps do not align -- not paired':>50}")
+            print(f"{name:<22} {'reps do not align, not paired':>50}")
             continue
 
         gaps = [a.regret - b.regret for a, b in zip(runs_, best_runs)]
@@ -241,7 +223,7 @@ def _paired(by_policy: dict[str, list[Run]], mean_ci) -> None:
         target = 0.02 * sum(r.regret for r in best_runs) / len(best_runs)
         needed = (2.0 * deviation / target) ** 2
 
-        print(f"{name:<22} {mean:>12.1f} {ci:>9.1f} {loose:>12.1f} {needed:>12,.0f}")
+        print(f"{name:<22} {mean:>12.1f} {ci:>9.1f} {loose:>12.1f} {needed:>12.0f}")
 
 
 if __name__ == "__main__":

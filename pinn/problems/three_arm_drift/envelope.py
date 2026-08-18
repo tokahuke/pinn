@@ -1,6 +1,4 @@
-"""
-The three-arm drift problem's premium cap (kb/three_arm_drift.md section 7).
-"""
+"""The three-arm drift problem's premium cap (kb/three_arm_drift.md section 7)."""
 
 from __future__ import annotations
 
@@ -24,43 +22,28 @@ def envelope(
     etahat: Tensor,
 ) -> Tensor:
     """
-    A cap on the premium: the value of being told the right answer for free,
-    over and over as it goes stale, discounted.
-
-        u_env = integral_0^inf e^(-t) nu2( m, Sigma_0 + E t ) dt
-
-    That integral has no closed form, but its rate of change splits into three
-    pieces, one per pair of arms, and each is (how likely that pair is tied)
-    times (how likely that pair is the one that decides it). The first factor
-    integrates to two_arm_drift's formula exactly; the second has no formula
-    and is bounded by 1, which is what we use. Full derivation, the measured
-    looseness, and why the tighter version is not built: section 7 of the doc.
-
-        u_env <= nu2(m, Sigma_0)  +  sum over pairs of correction(...)
-
-    Three things worth knowing before editing:
-
-    The pair precisions are ALREADY three_arm's feature quantities -- 1/Sigma_bb
-    is precision_b, 1/Sigma_cc is precision_c, and 1/Var(theta_b - theta_c) is
-    precision_bc. Reusing those expressions verbatim rather than inverting T is
-    what keeps the etahat = 0 anchor bitwise against the three_arm champion.
-
-    sqrt2 etahat, not etahat: two_arm's eta is a CONTRAST volatility, ours is
-    per arm, and two arms wandering independently make their contrast wander
-    sqrt2 faster (doc section 0).
-
-    abs on the means: `correction` is even in its mean mathematically, but its
-    overflow guard is written for the muhat >= 0 half that two_arm trains on,
-    and the unguarded branch overflows in float32. The tie density depends on
-    |mean| anyway, so this is the maths, not a workaround.
+    A cap on the premium: the value of being told the right answer for free, over
+    and over as it goes stale, discounted. `nu2` at the current belief plus one
+    closed-form correction per pair. Derivation, the measured looseness, and why the
+    tight version is not built: doc section 7.
     """
+    # Spelled as three_arm's feature quantities rather than by inverting T: reusing
+    # those expressions verbatim is what keeps the etahat = 0 anchor bitwise against
+    # the three_arm champion.
     det = tau_bb * tau_cc - tau_bc**2
     precision_b = tau_bb - tau_bc**2 / tau_cc
     precision_c = tau_cc - tau_bc**2 / tau_bb
     precision_bc = det / (tau_bb + tau_cc + 2.0 * tau_bc)
     correlation = -tau_bc / (tau_bb * tau_cc).sqrt()
+
+    # sqrt2, because two_arm's eta is a *contrast* volatility and ours is per arm:
+    # two arms wandering independently make their contrast wander that much faster
+    # (doc section 0).
     pair_etahat = SQRT2 * etahat
 
+    # abs on the means: `correction` is even in its mean mathematically, but its
+    # overflow guard is written for the muhat >= 0 half two_arm trains on, and the
+    # unguarded branch overflows in float32. The tie density depends on |mean| anyway.
     return (
         nu2(m_b, m_c, precision_b.rsqrt(), precision_c.rsqrt(), correlation)
         + correction(m_b.abs(), precision_b, pair_etahat)
@@ -90,9 +73,9 @@ if __name__ == "__main__":
     zero = torch.zeros_like(draw.m_b)
     fields = (draw.m_b, draw.m_c, draw.tau_bb, draw.tau_bc, draw.tau_cc)
 
-    # The anchor is an identity, not a tolerance: at etahat = 0 every
-    # correction carries an exactly-zero prefactor, so this IS three_arm's
-    # envelope and the champion graft is exact.
+    # The anchor is an identity, not a tolerance: at etahat = 0 every correction
+    # carries an exactly-zero prefactor, so this *is* three_arm's envelope and the
+    # champion graft is exact.
     assert torch.equal(envelope(*fields, zero), bare(draw))
 
     wide = Sample(*(field.double() for field in vars(draw).values()))
@@ -110,8 +93,8 @@ if __name__ == "__main__":
         assert (current >= previous - 1e-6).all(), etahat
         previous = current
 
-    # Shuffling the arm labels leaves it alone -- the b <-> c swap, which is
-    # what both wall conditions are statements about.
+    # Shuffling the arm labels leaves it alone: the b <-> c swap, which is what both
+    # wall conditions are statements about.
     drift = torch.rand_like(draw.m_b) * 20.0
     swapped = envelope(draw.m_c, draw.m_b, draw.tau_cc, draw.tau_bc, draw.tau_bb, drift)
 

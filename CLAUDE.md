@@ -85,7 +85,7 @@ Organized one-module-per-problem; the separation should be kept:
   the first derivative and breaks smooth pasting) so `0 <= u < envelope` is
   architectural (the old `tauhat**(-1/2)` envelope is its ridge slice; the
   pre-envelope linear-head class lives at the initial commit and is what loads
-  the champion checkpoint). `ValueFunction` wraps it as `v = relu(muhat) + u`.
+  the champion model). `ValueFunction` wraps it as `v = relu(muhat) + u`.
   Samplers: scrambled Sobol pushed through a long-tailed law spread over
   decades by a common log-scale (floor `1e-3` ≈ a 30-sd-wide prior — numerics
   only, no prior baked in; below that is 100x/decade stiffer territory nobody
@@ -121,7 +121,7 @@ Organized one-module-per-problem; the separation should be kept:
 - `pinn/problems/two_arm_drift/` — two_arm with a mean that itself diffuses,
   `d theta = eta dW` (kb/two_arm_drift.md). +0 state, +1 parameter: the
   state is still `(muhat, tauhat)` and `etahat = eta/(rho sigma)` is a third
-  NET INPUT, so one checkpoint serves every drift regime. Structured exactly
+  NET INPUT, so one model serves every drift regime. Structured exactly
   like two_arm (`sample.py`, `envelope.py`, `model.py`, `loss.py`) and reusing
   `two_arm/simplex.py` unchanged — the drift term is control-free, so it never
   touches the maximization, it only replaces `rho U` inside the source with
@@ -161,7 +161,7 @@ Organized one-module-per-problem; the separation should be kept:
   `relu(.)**2` units (`y/(1+y)`, bounded so from-scratch co-training cannot
   colonize the bulk) added to the response — movable curvature-jump
   primitives for the free-boundary junction, zero-init head so stitching
-  onto a trained checkpoint is bit-exact at step 0, alive-start bias +0.5.
+  onto a trained model is bit-exact at step 0, alive-start bias +0.5.
   `Sample.fold_ordered()` returns the applied relabel for policy readout
   (the old discarded-permutation TODO is resolved). Grading: the SUBSOLUTION
   objective since 2026-08-16 (kb/three_arm.md section 18) — maximize the
@@ -180,7 +180,34 @@ Organized one-module-per-problem; the separation should be kept:
   the loss one includes the S3-invariance identity, now on a RELATIVE
   tolerance (an absolute one is pinned to a loss magnitude that moves).
 - `pinn/net.py` — generic building blocks only (`GainedTanh`: trainable per-unit
-  activation gains).
+  activation gains), plus `DimensionlessValue`, the ABC every problem's
+  `DimensionlessValueFunction` implements (`load`, `bind`).
+- `pinn/problems/problem.py` — the `Problem` ABC, re-exported at
+  `pinn.problems`: `name`, `net` (the `DimensionlessValue` subclass it trains),
+  `init_model`, `objective`, `draw`, `loss`. One INSTANCE per package, defined
+  in that package's `__init__.py`, and `PROBLEMS` maps name to instance keyed
+  off `problem.name`, so the name is written once. This is what the CLI, the
+  loader and the trainer hold instead of a module found by
+  `import_module(f"pinn.problems.{problem}")`, which typed as `Any` and let
+  each package answer a slightly different set of functions. Adding a problem
+  means writing the subclass and listing it in `PROBLEMS`; `--problem` choices
+  are its keys. A problem package is ONE NAME WIDE: it exports its `Problem`
+  subclass, and every other name is imported from the module that owns it
+  (`from pinn.problems.three_arm.model import ValueFunction`). The re-export
+  facade it replaced was defined by whoever happened to import from the root,
+  and it drifted from `Problem` the moment `Problem` existed. No `__all__`
+  needed: nothing is re-exported. The arena's zoos are still looked up by module name, a
+  different axis (policy entrants, not nets).
+- `pinn/release.py` — the net a GitHub release ships for a problem, cached
+  under `torch.hub.get_dir()`. `load(problem, tag)` returns a `LoadedModule`,
+  a wrapper with no `policy` on it: the net is inert until
+  `.bind(rho=..., sigma=..., eta=...)` names one experiment's rates and
+  returns that problem's deployment `ValueFunction`. The wrapper forwards to
+  `DimensionlessValueFunction.bind`, one per problem, whose SIGNATURE is the
+  parameter list -- that is where a missing, misspelled or foreign parameter
+  raises. `.dimensionless` is the trainer/arena/probe path. The asset NAME is
+  read off the release API, never hardcoded, because it carries the topology
+  and the topology moves with every champion.
 - `pinn/utils.py` — shared math (`nu`: Gaussian expected positive part;
   `nu2`: bivariate version `E[max(0, X, Y)]` via a 24-node Gauss-Legendre
   bivariate normal CDF, smooth and double-backward-safe; both clamped at 0
@@ -195,7 +222,7 @@ Organized one-module-per-problem; the separation should be kept:
   `two_arm.py`/`three_arm.py` per-problem zoos (ETC, Thompson via exact
   normal/bivariate CDFs, ZTest/elimination, and the `Pinn` entrant whose
   PRIOR IS A POLICY PARAMETER — `prior_std` in arena units, `None` = the
-  flattest the checkpoint supports), `main.py` the CLI (mounted as `arena`
+  flattest the model supports), `main.py` the CLI (mounted as `arena`
   via pyproject `[project.scripts]`; reflection discovers the chosen
   problem's zoo).
 - `probes.py` — a click CLI at the repo root; everything else is a `pinn`
@@ -209,10 +236,17 @@ Organized one-module-per-problem; the separation should be kept:
 - Module self-checks run as `poetry run python -m pinn.problems.two_arm.loss`
   (relative imports; both problem packages check per-module).
 
-`data/` is gitignored and holds checkpoints (`*.pt`) and diagnostic plots. Plots
-belong there (visible in the IDE), not in temp dirs.
+`data/` is gitignored and holds model files (`*.pt`) and diagnostic plots. Plots
+belong there (visible in the IDE), not in temp dirs. It is a TRAINING
+directory: the canonical way to GET a trained net is `pinn.release.load`, which
+takes it from the latest GitHub release and caches it outside the repo. Nothing
+outside this repo should be told to curl an asset into `data/`.
 
-CHECKPOINT NAMING (re-cut 2026-08-12): every real checkpoint file is
+RELEASE NAMING: GitHub releases are codenamed, one person per release,
+alphabetical -- kb/releases.md holds the scheme, the roster and what has
+shipped. Model files are named on their own rule, below.
+
+MODEL FILE NAMING (re-cut 2026-08-12): every real model file is
 `<problem>.<topology>.pt` with the topology spelled in `x` —
 `two_arm.32x256.pt`, `two_arm.16x16.pt`, `three_arm.64x64x64k8.pt`. The
 champion is a SYMLINK at the bare `<problem>.pt` pointing at whichever of them
@@ -226,16 +260,16 @@ comparable at all. Still banned: hyperparameter tags (they expire — `_pos10`
 outlived its weight in a day), loss values (metric-dependent, and one already
 caused a false comparison), colons (scp and rsync read `a:b` as host:path).
 
-CHECKPOINTS DECLARE THEIR ARCHITECTURE (2026-08-13). Every premium subclasses
+MODEL FILES DECLARE THEIR ARCHITECTURE (2026-08-13). Every premium subclasses
 `net.DeclaresTopology` and passes `(FEATURE_COUNT, hidden, kinks)` up; those
 become buffers, so `state_dict()` carries the shape and a loader READS it
 (`read_topology`, `read_features`) instead of reverse-engineering it from
 weight geometry. `hidden_widths` and the per-problem `_kinks` scans are
-DELETED and all 19 checkpoints were rewritten that day — a `KeyError` on
+DELETED and all 19 model files were rewritten that day — a `KeyError` on
 `premium.topology` means a file older than that, which is a file to migrate,
 not a case to handle. The buffers always describe the module holding them and
 a loaded state dict cannot contradict them; that invariant is what stops a
-graft (smooth checkpoint into a kinked net) from saving a declaration its own
+graft (smooth model into a kinked net) from saving a declaration its own
 weights disprove. Do not reintroduce shape inference: prefix-matching a state
 dict for `kink_in.weight` or `net.0.weight` was the bug class twice in one
 session.
@@ -273,8 +307,8 @@ Both two-arm problems have since left that scale entirely: they are graded by
 the SUBSOLUTION objective, whose numbers are a violation and a climb, not a
 two-sided residual. The line above is a baseline for the three-arm pair only.
 
-- two_arm: `two_arm.pt` -> `two_arm.16x16.pt`, a SUBSOLUTION net -- the
-  objective changed 2026-08-15 to maximize the premium subject to
+- two_arm: `two_arm.pt` -> `two_arm.16x16.pt`, trained by the SUBSOLUTION
+  OBJECTIVE -- it changed 2026-08-15 to maximize the premium subject to
   `v <= max H` (kb/two_arm.md section 10), and the two-sided residual it
   replaced exists only in that record. Against the net it replaced: overclaiming states 23.7% -> 0.60%,
   sup(residual+) 2.08e-2 -> 4.27e-4, premium and BC1 intact -- and a two-sided
@@ -298,8 +332,8 @@ two-sided residual. The line above is a baseline for the three-arm pair only.
   CONVERGED FOR THIS TOPOLOGY: three learning rates, 1e-4 (19x), 3e-5 (38%),
   1e-5 (2%) -- the last cut bought nothing, so the floor is 24x24's, not the
   schedule's, and the next lever is width or a kink graft. No kink branch.
-- three_arm: `three_arm.pt` -> `three_arm.64x64x64k8.pt`, a SUBSOLUTION net
-  since 2026-08-16, trained off the two-sided champion it replaced (kept as
+- three_arm: `three_arm.pt` -> `three_arm.64x64x64k8.pt`, on the SUBSOLUTION
+  OBJECTIVE since 2026-08-16, trained off the two-sided champion it replaced (kept as
   `three_arm.64x64x64k8.two-sided.pt`; the two are NOT comparable on pde).
   Mean violation 1.92e-3 -> 2.59e-5, overclaiming states 26.8% -> 1.44%,
   sup(residual+) 3.52e-1 -> 2.28e-2, and the premium UP 0.3% -- it fixes where
@@ -341,7 +375,7 @@ project memory, not committed), the two_arm PINN policy beat
 Thompson sampling — the strongest practical baseline — by ~20% of
 discounted regret while buying less than half the information, with baseline
 values stable across independent sweeps. CAVEAT: that sweep and the tables in
-kb/arena_results.md were run on checkpoints two or three generations back
+kb/arena_results.md were run on models two or three generations back
 (the names they cite no longer exist), and predate the natural-units fix
 entirely. Re-run both once the retrains land.
 
@@ -360,7 +394,7 @@ Open frontiers:
   production parameters, both halves invert: harsh drift -38,753 +/- 3,591
   regret (a 62% CUT) on 3.6x the evidence, deployment drift +361 +/- 601
   (indistinguishable from zero). The old number was taken against a
-  checkpoint since replaced by one 39x better on the residual, and by then
+  model since replaced by one 39x better on the residual, and by then
   the crutch was the injury. LESSON: a guard justified against a broken net
   must be re-measured every time the net is replaced, or it silently becomes
   the thing being measured.
@@ -420,7 +454,7 @@ Open frontiers:
   +571 [-28, +1171] against that champion). Any new three-arm work is measured
   against IT. three_arm_v3, which tried to learn a correction on top of that
   base, was scrubbed 2026-08-16 having added +412 [-44, +867]. The
-  SUBSOLUTION net of that same date is the first to clear it, -863 +/- 354
+  SUBSOLUTION-OBJECTIVE net of that same date is the first to clear it, -863 +/- 354
   over 20,000 paired reps in two blocks (section 18) -- the bar is now beaten,
   not merely matched, and it stays the bar.
 - The b/c-junction blob (three_arm): the one-sided half of the subsolution
@@ -472,10 +506,10 @@ Planned next:
   kinks grafted after) remains the better cast either way.
 - DEFUSED 2026-08-10, kept because it explains old records: training used to
   decay the lr with a 100k half-life, and every resume restarted that schedule
-  at its hot end, so short resumed runs first SMEARED a polished checkpoint
+  at its hot end, so short resumed runs first SMEARED a polished model
   (~1k iterations of bounce) before improving it. Read the first ~1k prints of
   any historical resume with that in mind. The lr is now constant, no schedule.
-  Adam's moments are still not checkpointed, so a resume does pay one
+  Adam's moments are still not saved with the model, so a resume does pay one
   `sign(g)` step of size `lr` on every parameter.
 - NEVER put a scale on the PDE residual, and audit any coordinate change for
   one you did not intend. A similarity chart is a DERIVATION tool (it
@@ -506,7 +540,7 @@ Planned next:
 - Changing the pde term's magnitude detonates every weight calibrated against
   it — recheck ridge, ties, positivity and concavity after any
   loss-functional change. Set degeneracy breakers from the DEAD SOLUTION
-  instead of from a checkpoint's error level: `u = 0` scores pde exactly 0,
+  instead of from a model's error level: `u = 0` scores pde exactly 0,
   ridge exactly 0.25 and the control tie exactly 1.0, so `W * dead_value`
   must beat the live pde or the dead branch is the better minimum. That floor
   is analytic and net-independent in form; the enforcement level above it is

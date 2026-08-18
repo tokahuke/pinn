@@ -1,50 +1,61 @@
 """
-Hero image: the three-arm policy field in sd-normalized coordinates, with
-real simulated experiments wandering over it until the free boundaries stop
-them. Background field at tau = 1 (the chart where the policy is
-quasi-stationary in sd units); trajectories simulated with the true
-posterior dynamics under the champion's policy.
+Hero image: the three-arm policy field in sd-normalized coordinates, with real
+simulated experiments wandering over it until the free boundaries stop them.
+Background field at tau = 1 (the chart where the policy is quasi-stationary in sd
+units); trajectories simulated with the true posterior dynamics under the champion's
+policy.
 """
 
 from __future__ import annotations
 
 import io
-
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
+from matplotlib.axes import Axes
 from matplotlib.collections import LineCollection
 from PIL import Image
-
-
-from pinn.problems.three_arm import DimensionlessValueFunction, ValueFunction
-from pinn.problems.two_arm import (
+from pinn.problems.three_arm.model import DimensionlessValueFunction, ValueFunction
+from pinn.problems.two_arm.model import (
     DimensionlessValueFunction as TwoArmDimensionless,
     ValueFunction as TwoArmValue,
 )
-from pinn.problems.two_arm_drift import (
+from pinn.problems.two_arm_drift.model import (
     DimensionlessValueFunction as DriftDimensionless,
     ValueFunction as DriftValue,
 )
 
 ANCHORS = np.array(
     [
-        [42 / 255, 120 / 255, 214 / 255],  # control - blue
-        [235 / 255, 104 / 255, 52 / 255],  # B - orange
-        [27 / 255, 175 / 255, 122 / 255],  # C - aqua
+        [42 / 255, 120 / 255, 214 / 255],  # control: blue
+        [235 / 255, 104 / 255, 52 / 255],  # B: orange
+        [27 / 255, 175 / 255, 122 / 255],  # C: aqua
     ]
 )
+"""One colour per arm; the allocation mixes them into the field."""
+
 DOT_COLORS = ["#1b4f8f", "#a63c16", "#0e7a53"]
+"""The same three colours, darkened, for the dot marking a commitment."""
 
 PATHS = 30
+"""How many experiments are simulated over the field."""
+
 DT = 5e-3
+"""Simulation step, small enough that a path resolves the boundary it rides."""
+
 HORIZON = 12.0
+"""How long a path runs before it is abandoned uncommitted."""
+
 TAU0 = 0.3
+"""Precision every path is born with."""
+
 SPAN = 2.9
+"""Half-width of the field, in posterior standard deviations."""
 
 
 def field(value: ValueFunction, n: int = 480) -> np.ndarray:
+    """The policy over an n by n grid of means, as an rgb image mixed from ANCHORS."""
     tau = 1.0
     deviation = (0.75 * tau) ** -0.5
     axis = torch.linspace(-SPAN * deviation, SPAN * deviation, n)
@@ -60,7 +71,13 @@ def field(value: ValueFunction, n: int = 480) -> np.ndarray:
     return (alpha.numpy() @ ANCHORS).reshape(n, n, 3)
 
 
-def simulate(value: ValueFunction) -> tuple[list, list]:
+def simulate(
+    value: ValueFunction,
+) -> tuple[list[list[tuple[float, float]]], list[int]]:
+    """
+    PATHS experiments run under the policy until each commits: their trails in
+    sd-normalized means, and the arm each one settled on (-1 where it never did).
+    """
     torch.manual_seed(11)
     m_b = torch.zeros(PATHS)
     m_c = torch.zeros(PATHS)
@@ -119,6 +136,7 @@ def simulate(value: ValueFunction) -> tuple[list, list]:
 
 
 def main() -> None:
+    """Render the three-arm hero image to docs/hero.png."""
     value = ValueFunction(
         DimensionlessValueFunction.load("data/three_arm.pt"), rho=1.0, sigma=1.0
     )
@@ -151,9 +169,9 @@ def main() -> None:
 
         segments = np.stack([points[:-1], points[1:]], axis=1)
 
-        # Evolving thickness carries the arrow of time: each test is born as
-        # a hairline and commits at full weight. One opaque color, so there
-        # is no gradient for the eye to average and no compositing to bead.
+        # Evolving thickness carries the arrow of time: each test is born a hairline
+        # and commits at full weight. One opaque colour, so there is no gradient for the
+        # eye to average and no compositing to bead.
         widths = np.linspace(0.35, 2.6, len(segments))
         ax.add_collection(
             LineCollection(
@@ -178,8 +196,8 @@ def main() -> None:
     ax.axis("off")
     fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
 
-    # Supersample 2x and downsample with Lanczos: the hairline ends of the
-    # tapers live below one output pixel, where direct rendering aliases.
+    # Supersample 2x and downsample with Lanczos: the hairline ends of the tapers live
+    # below one output pixel, where direct rendering aliases.
     buffer = io.BytesIO()
     fig.savefig(buffer, format="png", dpi=300, transparent=True)
     plt.close(fig)
@@ -188,10 +206,10 @@ def main() -> None:
     print("saved docs/hero.png")
 
 
-def _draw_trail(ax, trail: list[tuple[float, float]]) -> np.ndarray:
+def _draw_trail(ax: Axes, trail: list[tuple[float, float]]) -> np.ndarray:
     """
-    The shared trail treatment: decimate, smooth, taper. Returns the final
-    point so the caller can place the decision dot.
+    The shared trail treatment: decimate, smooth, taper. Returns the final point so
+    the caller can place the decision dot.
     """
     points = np.array(trail)[::10]
     points = np.vstack([points, trail[-1]])
@@ -213,10 +231,10 @@ def _draw_trail(ax, trail: list[tuple[float, float]]) -> np.ndarray:
 
 def two_arm_hero() -> None:
     """
-    The funnel of doubt: x is accumulated precision (time flows right), y is
-    the belief about the treatment effect, the field is the policy (blue =
-    all-in control, orange = all-in treatment), and each test rides the
-    funnel until a wall commits it.
+    The funnel of doubt: x is accumulated precision (time flows right), y is the
+    belief about the treatment effect, the field is the policy (blue is all-in
+    control, orange all-in treatment), and each test rides the funnel until a wall
+    commits it.
     """
     value = TwoArmValue(TwoArmDimensionless.load("data/two_arm.pt"), rho=1.0, sigma=1.0)
 
@@ -248,8 +266,8 @@ def two_arm_hero() -> None:
     tau_max = 1.05 * max(trail[-1][0] for trail in trails if trail)
     mu_max = 1.10 * max(abs(point[1]) for trail in trails for point in trail)
 
-    # Breathing room left of the birth point; floored above the decade where
-    # the field is untrained.
+    # Breathing room left of the birth point, floored above the decade where the
+    # field is untrained.
     tau_left = max(0.1, TAU0 - 0.04 * (tau_max - TAU0))
 
     columns, rows = 760, 380
@@ -305,12 +323,10 @@ def two_arm_hero() -> None:
 
 def drift_hero() -> None:
     """
-    The funnel of doubt with a wandering truth: same chart as two_arm_hero
-    (x accumulated precision, y belief, field the policy), but the world
-    drifts, so precision erodes at eta^2 tau^2. Exploring paths climb toward
-    the drift ceiling instead of running right forever; a committed path buys
-    nothing, slides LEFT as its knowledge rots, and the boundary re-opens it
-    -- no decision is final, and the picture shows the cycle.
+    The funnel of doubt with a wandering truth: two_arm_hero's chart (x precision, y
+    belief, field the policy) in a world that drifts, so precision erodes at
+    eta^2 tau^2. Exploring paths climb toward the drift ceiling instead of running
+    right forever, and a committed one slides *left* until the boundary re-opens it.
     """
     etahat = 0.7
     paths, horizon = 18, 8.0
@@ -327,10 +343,9 @@ def drift_hero() -> None:
     tau = torch.full((paths,), birth_tau)
     trails: list[list[tuple[float, float]]] = [[] for _ in range(paths)]
 
-    # A dot per committed EPISODE, placed where it began -- under drift a
-    # commit is an event on the way, not a fate: the slide left that follows
-    # is the commitment rotting until the boundary re-opens it. Episodes
-    # shorter than the debounce are wall chatter, not decisions.
+    # A dot per committed *episode*, placed where it began: under drift a commit is an
+    # event on the way, not a fate, and the slide left after it is the commitment
+    # rotting until the boundary re-opens it. Shorter than the debounce is wall chatter.
     debounce = int(0.4 / DT)
     entry: list[tuple[float, float, int] | None] = [None] * paths
     streak = [0] * paths
@@ -344,9 +359,9 @@ def drift_hero() -> None:
         share = value.policy(m, tau)
 
         for i in range(paths):
-            # Near-vertex counts as committed: the boundary chatters by
-            # epsilon while a path rides the wall, and exact-vertex tests
-            # would split one ride into confetti.
+            # Near-vertex counts as committed: the boundary chatters by epsilon while
+            # a path rides the wall, and exact-vertex tests would split one ride into
+            # confetti.
             if float(share[i]) >= 0.995 or float(share[i]) <= 0.005:
                 if entry[i] is None:
                     entry[i] = (float(tau[i]), float(m[i]), int(float(share[i]) >= 0.5))
@@ -359,9 +374,9 @@ def drift_hero() -> None:
 
         rate = share * (1.0 - share)
 
-        # Belief dynamics under drift: same innovation as the static funnel,
-        # while precision gains the erosion. At a vertex rate = 0, so the mean
-        # freezes and the path slides left until the boundary re-opens it.
+        # Belief dynamics under drift: same innovation as the static funnel, while
+        # precision gains the erosion. At a vertex rate = 0, so the mean freezes and the
+        # path slides left until the boundary re-opens it.
         m = m + (rate.sqrt() / tau) * DT**0.5 * torch.randn(paths)
         tau = (tau + (rate - etahat**2 * tau**2) * DT).clamp_min(0.05)
         t += DT

@@ -14,14 +14,14 @@ from pathlib import Path
 from torch import Tensor
 from typing import Self
 
-from ...net import DeclaresTopology, GainedTanh, parse_topology
+from ...net import DeclaresTopology, DimensionlessValue, GainedTanh, parse_topology
 from ...net import read_features, read_topology
 from ..three_arm.simplex import Maximum, maximize_quadratic
 from .envelope import envelope as premium_cap
 from .sample import Sample
 
-# three_arm's fifteen, plus the drift coordinate.
 FEATURE_COUNT = 16
+"""three_arm's fifteen, plus the drift coordinate."""
 
 SQRT3 = math.sqrt(3.0)
 
@@ -30,13 +30,11 @@ class ExplorationPremium(DeclaresTopology):
     """
     The premium net over the fundamental wedge.
 
-    Plain function on the wedge, no symmetry machinery (fold + wall losses
-    carry S3); the feature list in forward; one GainedTanh MLP over the
-    stacked features, Xavier-tanh init, shallow profile; the free-information
-    envelope of doc section 7 multiplying the relu-squared rational response
-    (relu(r)**2 / (1 + relu(r)**2)).
-    Warm-starting from the two_arm champion is deferred to v2 by the
-    one-variable-at-a-time rule.
+    Plain function on the wedge, no symmetry machinery (fold + wall losses carry S3);
+    the feature list in forward; one GainedTanh MLP over the stacked features,
+    Xavier-tanh init, shallow profile; the free-information envelope of doc section 7
+    multiplying the saturated softplus response (y / (1 + y) with
+    y = (softplus(k r) / k)**2).
     """
 
     def __init__(self, hidden: list[int], kinks: int = 0) -> None:
@@ -62,23 +60,14 @@ class ExplorationPremium(DeclaresTopology):
             layers.append(linear)
             layers.append(GainedTanh(sizes[i + 1]))
 
-        # Linear head (final GainedTanh sliced off): the response is mapped
-        # through relu(r)**2 / (1 + relu(r)**2) in forward, which both
-        # confines u inside the proven bound and builds in the free-boundary
-        # regularity.
+        # Linear head (final GainedTanh sliced off): the response is mapped through
+        # the saturated softplus gate in forward, which both confines u inside the
+        # proven bound and builds in the free-boundary regularity.
         self.net = nn.Sequential(*layers[:-1])
 
-        # Kink units: parallel saturated relu(.)**2 primitives added to the
-        # response -- movable curvature jumps for the free-boundary junction
-        # (the blob), which tanh ridges cannot synthesize cheaply. Each unit
-        # is y/(1+y), y = relu(.)**2: same curvature-jump regularity at the
-        # crease, but bounded output, so the branch is architecturally bad at
-        # painting the smooth bulk and cannot colonize it in from-scratch
-        # co-training (observed 2026-08-06 with bare relu**2: the branch
-        # outgrew the tanh stack early and took half the field, 2 orders
-        # worse). Zero-init output layer: stitched onto a trained checkpoint,
-        # the branch contributes exactly 0 at step 0, so training resumes
-        # from the checkpoint's function.
+        # Movable curvature jumps for the free-boundary junction, saturated so the
+        # branch cannot colonize the smooth bulk, and zero-init so a graft is silent
+        # at step 0. What that buys and what it cost to learn: doc section 9.
         self.kinks = kinks
 
         if kinks > 0:
@@ -87,10 +76,8 @@ class ExplorationPremium(DeclaresTopology):
             nn.init.zeros_(self.kink_out.weight)
             nn.init.zeros_(self.kink_out.bias)
 
-            # Alive start (the head-bias-1 lesson, one level down): a relu**2
-            # unit that is never active gets no gradient and never recovers;
-            # a positive bias opens every unit on a healthy slice of the
-            # cloud (observed 2026-08-06: default init left 3 of 8 dead).
+            # Alive start: a relu**2 unit that is never active gets no gradient and
+            # never recovers (doc section 9).
             nn.init.constant_(self.kink_in.bias, 0.5)
 
         # Envelope scale, init 0: at scale exactly 1 the envelope is a proven
@@ -98,18 +85,14 @@ class ExplorationPremium(DeclaresTopology):
         # solution starts inside the tanh range.
         self.log_scale = nn.Parameter(torch.zeros(()))
 
-        # Gate sharpness k for the softplus response (see forward). Init 10:
-        # near the relu gate it replaces, so grafting a relu-gate checkpoint
-        # moves the function only by O(1/k^2) at the seam and e^(-2k|r|)
-        # elsewhere. Trainable: the net picks how hard its own boundary is.
+        # Gate sharpness k for the softplus response (see forward). Init 10, near the
+        # relu gate it replaces, so grafting a relu-gate net moves the function only by
+        # O(1/k^2) at the seam. Trainable: the net picks how hard its boundary is.
         self.log_gate = nn.Parameter(torch.tensor(math.log(10.0)))
 
-        # Xavier assumes unit-variance inputs; the raw feature stack breaks
-        # that by 10-100x under the general sampling law, railing the first
-        # tanh layer (measured 2026-08-05: 49% of units saturated, fatal for
-        # deep profiles whose later layers see only those units). Calibrate a
-        # fixed per-feature scale from the law once at init; it is a buffer,
-        # so checkpoints carry it.
+        # Xavier assumes unit-variance inputs and the raw stack breaks that by
+        # 10-100x, railing the first tanh layer (2026-08-05: 49% of units saturated).
+        # Calibrated once at init into a buffer, so a saved net carries it.
         self.register_buffer("feature_scale", torch.ones(FEATURE_COUNT))
 
         draw = Sample.draw(4096).fold()
@@ -125,17 +108,8 @@ class ExplorationPremium(DeclaresTopology):
         """
         Adopt another premium's parameters: a three_arm checkpoint (one feature
         narrower), or a drift one whose kink branch does not match this net's.
-
-        Explicit, where three_arm does this implicitly in _load_from_state_dict.
-        It has to be: padding the first layer with a zero column for the drift
-        feature is a shape change, and a setdefault cannot express one. At
-        etahat = 0 that feature is exactly 0 and the envelope collapses onto
-        three_arm's, so the stitched net IS the source, bitwise.
-
-        Kinks go both ways. A source without a branch keeps this net's
-        zero-init one, so the graft is a no-op at step 0; a source WITH one
-        being loaded into a net without is dropped, which is the smooth-first
-        path. Anything else missing is a real mismatch and should fail loudly.
+        Anything else missing is a real mismatch and fails loudly. What it pads, what
+        it defaults, and how close the three_arm anchor lands: doc section 9.
         """
         state = dict(source)
 
@@ -155,11 +129,9 @@ class ExplorationPremium(DeclaresTopology):
                 [state["feature_scale"], self.feature_scale[-1:]]
             )
 
-        # The kink BRANCH by name, not by a "kink_" prefix -- that prefix also
-        # matches the kink_count buffer, and dropping it left the graft
-        # undeclared and unloadable. (DeclaresTopology restores both shape
-        # buffers to this net's own, so the source's stale declaration cannot
-        # survive the load.)
+        # The branch by name, never by a "kink_" prefix, which would also match the
+        # kink_count buffer and leave the graft undeclared. DeclaresTopology restores
+        # both shape buffers to this net's own, so a stale declaration cannot survive.
         mine = self.state_dict()
         branch = ("kink_in.weight", "kink_in.bias", "kink_out.weight", "kink_out.bias")
 
@@ -186,18 +158,13 @@ class ExplorationPremium(DeclaresTopology):
         etahat: Tensor,
     ) -> Tensor:
         """
-        The raw (uncalibrated) feature stack. three_arm returns the marginal
-        precisions alongside for its envelope to reuse; the drift envelope
-        recomputes them from the state instead, which is what keeps the
-        etahat = 0 anchor bitwise, so they are not returned here.
+        The raw (uncalibrated) feature stack. Unlike three_arm this returns no
+        marginal precisions: the drift envelope recomputes them from the state, which
+        is what keeps the etahat = 0 anchor bitwise.
         """
-        # Marginal precision per contrast, via Schur complements of T. NOT the
-        # raw diagonals: tau_bb is the precision GIVEN the other contrast --
-        # conditioning you do not have -- and overstates certainty exactly in
-        # the correlated states where the shared control matters. The b-c
-        # denominator is the sum of the a-b and a-c pair coordinates, positive
-        # on reachable states (harmonic combination when tau_bc = 0: verified
-        # 1/(1/2 + 1/3) = 6/5 in-session).
+        # Marginal precision per contrast, via Schur complements of T. Not the raw
+        # diagonals: tau_bb is the precision *given* the other contrast, conditioning
+        # you do not have, so it overstates certainty where the control matters.
         det = tau_bb * tau_cc - tau_bc**2
         precision_b = tau_bb - tau_bc**2 / tau_cc
         precision_c = tau_cc - tau_bc**2 / tau_bb
@@ -218,8 +185,8 @@ class ExplorationPremium(DeclaresTopology):
                 precision_b.log(),
                 precision_c.log(),
                 precision_bc.log(),
-                # z-scores: each mean in units of its own marginal sd -- the
-                # two_arm corridor-alignment win, once per contrast.
+                # z-scores: each mean in units of its own marginal sd, the two_arm
+                # corridor-alignment win, once per contrast.
                 m_b * precision_b.sqrt(),
                 m_c * precision_c.sqrt(),
                 m_bc * precision_bc.sqrt(),
@@ -232,13 +199,9 @@ class ExplorationPremium(DeclaresTopology):
                 # two contrasts' beliefs, in [0, 1) on reachable states;
                 # r = 0 is the decoupled two_arm limit.
                 correlation,
-                # The drift coordinate, LAST because the graft pads on the
-                # right. It is the state's share of the ceiling drift imposes,
-                # which is exactly the erosion term's own coefficient
-                # (kb/three_arm_drift.md sections 6 and 8): bounded on the
-                # reachable set, unchanged by shuffling arm labels since det T
-                # is the invariant, and exactly 0 at etahat = 0 -- which is
-                # what makes the three_arm graft bitwise rather than close.
+                # The drift coordinate, *last* because the graft pads on the right:
+                # the state's share of the ceiling drift imposes, bounded, relabel-
+                # invariant, and exactly 0 at etahat = 0 (doc sections 6 and 8).
                 torch.log1p(2.0 * SQRT3 * etahat**2 * det),
             ],
             dim=-1,
@@ -265,51 +228,29 @@ class ExplorationPremium(DeclaresTopology):
             bumps = torch.relu(self.kink_in(scaled)) ** 2
             response = response + self.kink_out(bumps / (1.0 + bumps)).squeeze(-1)
 
-        # The free-information envelope of doc section 7: three_arm's exact
-        # nu2 plus one closed-form drift correction per pair, collapsing
-        # BITWISE onto nu2 at etahat = 0. A proven upper bound; under drift
-        # it is 1-3% loose at the startup pin rather than exact (three_arm's
-        # nu-sum predecessor was 1.17x to 1.87x loose there and bred a
-        # never-explore attractor). No correlation clamp: k < 1 strictly on
-        # reachable states, and a clamp would kink d(envelope)/d(tau_bc)
-        # exactly where the corner needs it.
+        # The free-information envelope of doc section 7, a proven upper bound that
+        # collapses *bitwise* onto three_arm's nu2 at etahat = 0. No correlation clamp,
+        # which would kink d(envelope)/d(tau_bc) at the corner that needs it.
         envelope = self.log_scale.exp() * premium_cap(
             m_b, m_c, tau_bb, tau_bc, tau_cc, etahat
         )
 
-        # y/(1+y) with y = (softplus(k r)/k)**2 maps the response into
-        # [0, 1): 0 < u < envelope is architectural, and u is STRICTLY
-        # positive -- under drift there is no contact set (2ad doc section 5,
-        # u > 0 everywhere is a theorem), and the relu gate this replaces
-        # (2026-08-14) could not represent that. Worse than a representation
-        # gap: the commit envelope solves the interior equation EXACTLY, so
-        # wherever relu pinned u to 0 the residual was exactly 0 and an
-        # oversized commit region cost nothing -- the boundary was determined
-        # only by a thin seam band, and at etahat ~ 7.5 it collapsed to the
-        # origin (arena 2026-08-14: commits at epoch ~93, precision time
-        # 67.5 +/- 1.1, evidence-independent). With the softplus tail
-        # u ~ envelope e^(2 k r) the transport equation grades the whole
-        # former dead region, and never-explore leaves the function class.
-        # The cost, spent knowingly: at etahat = 0 the true contact set is
-        # real and this gate can only approach it (e^(-2k|r|)), so the
-        # three_arm graft anchor is close-not-bitwise. Rational saturation,
-        # NOT tanh (float32-exactly 1 beyond r ~ 2.5, gradient underflow, a
-        # cliff with no way back); softplus for the same reason on the low
-        # side: its tail keeps a live gradient at any depth float32 holds.
+        # y/(1+y) with y = (softplus(k r)/k)**2: 0 < u < envelope architecturally, and
+        # u strictly positive, which drift needs since there is no contact set here.
+        # Why softplus and not relu, with the measurement: doc section 9.
         gate = self.log_gate.exp()
         y = (torch.nn.functional.softplus(gate * response) / gate) ** 2
 
         return envelope * y / (1.0 + y)
 
 
-class DimensionlessValueFunction(nn.Module):
+class DimensionlessValueFunction(DimensionlessValue):
     """
-    The thing training grades: v = max(0, m_b, m_c) + u. The commit envelope
-    carries all three kinks (hand-written relu-of-max); the premium net stays
-    smooth, exactly the two_arm division of labor. Units rho = sigma = 1,
-    which is the dimensionless form (doc section 4), and the premium is
-    only trained on the fundamental wedge -- deployment goes through
-    ValueFunction, which papers over both cuts.
+    The thing training grades: v = max(0, m_b, m_c) + u. The commit envelope carries
+    all three kinks (hand-written relu-of-max); the premium net stays smooth, exactly
+    the two_arm division of labor. Units rho = sigma = 1, which is the dimensionless
+    form (doc section 4), and the premium is only trained on the fundamental wedge,
+    since deployment goes through ValueFunction, which papers over both cuts.
     """
 
     def __init__(self, premium: nn.Module) -> None:
@@ -319,10 +260,7 @@ class DimensionlessValueFunction(nn.Module):
 
     @classmethod
     def load(cls, path: Path) -> Self:
-        """
-        A trained checkpoint as a model, architecture inferred from the state
-        dict.
-        """
+        """A trained checkpoint as a model, architecture inferred from the state dict."""
         state = torch.load(path)
         hidden, kinks = read_topology(state)
         value = cls(ExplorationPremium(hidden, kinks=kinks))
@@ -332,6 +270,14 @@ class DimensionlessValueFunction(nn.Module):
         value.load_state_dict(state)
 
         return value
+
+    def bind(self, rho: float, sigma: float, eta: float) -> ValueFunction:
+        """
+        This net tied to one experiment, which is what makes it usable: means
+        and precisions go in and come back in your own units. `eta` is the
+        drift rate of the effect itself.
+        """
+        return ValueFunction(self, rho, sigma, eta)
 
     def forward(
         self,
@@ -356,23 +302,10 @@ class DimensionlessValueFunction(nn.Module):
         etahat: Tensor,
     ) -> tuple[Tensor, Maximum, tuple[Tensor, Tensor, Tensor]]:
         """
-        The HJB's two sides on wedge states: the value v and the maximized
-        Hamiltonian (three_arm.md section 10). Returns the learning numbers
-        (l_ab, l_ac, l_bc) as well, for the loss's sampled-direction
-        concavity grading. Pairwise learning numbers: for pair
-        direction dir, w = T^{-1} dir, and L = mean-diffusion Ito term
-        (1/2) w' D2m(v) w plus the precision-drift term (dir-form on dv/dT);
-        H(b, c) = b (m_b + l_ab) + c (m_c + l_ac) - l_ab b^2 - l_ac c^2
-        + (l_bc - l_ab - l_ac) b c, handed to plain calculus in
-        triangle-quadratic coefficients. Everything is graph-connected to the
-        premium's parameters, so subsolution_loss grades the gap and policy reads the
-        argmax off the same derivation.
-
-        Drift adds one thing, on the LEFT: what the wandering erodes from the
-        precision each instant, T E T, contracted with the value's precision
-        derivatives. It does not depend on the allocation, so the maximization
-        below is byte-identical to three_arm's and the simplex code is that
-        module's, imported unchanged (doc section 2).
+        The HJB's two sides on wedge states: v, the maximized Hamiltonian, and the
+        learning numbers (l_ab, l_ac, l_bc) for the concavity grading. Drift adds the
+        control-free erosion T E T on the *left*, so the maximization is three_arm's
+        byte for byte (doc section 2; three_arm.md section 10).
         """
         m_b = m_b.detach().requires_grad_(True)
         m_c = m_c.detach().requires_grad_(True)
@@ -414,10 +347,9 @@ class DimensionlessValueFunction(nn.Module):
             v_tbb + v_tcc - v_tbc
         )
 
-        # The erosion, T E T = etahat^2 (T^2 + v v^T) with v = T 1, whose two
-        # entries are the a-b and a-c pair coordinates. Coefficient one on each
-        # of the three independent entries, matching the chain-rule convention
-        # the learning numbers above already use.
+        # The erosion, T E T = etahat^2 (T^2 + v v^T) with v = T 1, whose two entries
+        # are the a-b and a-c pair coordinates. Coefficient one on each independent
+        # entry, the convention the learning numbers above already use.
         pair_ab = tau_bb + tau_bc
         pair_ac = tau_cc + tau_bc
         erosion = etahat**2
@@ -458,14 +390,12 @@ class ValueFunction(nn.Module):
     """
     Deployment-facing value: real units in and out, any reachable state.
 
-    Wraps a trained DimensionlessValueFunction with the three_arm.md
-    section 11 readout dictionary -- mhat = m / (sigma sqrt(rho)), tauhat =
-    rho sigma^2 tau, etahat = eta / (rho sigma), V = (sigma / sqrt(rho)) vhat
-    -- and folds arbitrary states into the
-    fundamental wedge for the premium (S3-invariant, doc section 1), keeping
-    the commit term in physical labels. States must still be reachable
-    (tau_bc <= 0, pair coordinates nonnegative); rho = sigma = 1 on wedge
-    states recovers the dimensionless form exactly.
+    Wraps a trained DimensionlessValueFunction with the three_arm.md section 11
+    readout dictionary (mhat = m / (sigma sqrt(rho)), tauhat = rho sigma^2 tau,
+    etahat = eta / (rho sigma), V = (sigma / sqrt(rho)) vhat) and folds arbitrary
+    states into the fundamental wedge for the premium, keeping the commit term in
+    physical labels. States must still be reachable (tau_bc <= 0, pair coordinates
+    nonnegative).
     """
 
     def __init__(
@@ -522,9 +452,9 @@ class ValueFunction(nn.Module):
     ) -> Tensor:
         """
         The argmax allocation over physical arms, shape (n, 3) rows
-        (alpha_a, alpha_b, alpha_c): the dimensionless wedge policy, folded
-        in and un-permuted back through fold_ordered's relabel. Allocations
-        are dimensionless fractions, so only the inputs rescale.
+        (alpha_a, alpha_b, alpha_c): the wedge policy folded in and un-permuted back
+        through fold_ordered's relabel. Allocations are fractions, so only the inputs
+        rescale.
         """
         folded, order = self._fold(m_b, m_c, tau_bb, tau_bc, tau_cc)
         roles = self.dimensionless.policy(
@@ -543,13 +473,10 @@ def init_model(
     state: dict | None = None, topology: str | None = None
 ) -> DimensionlessValueFunction:
     """
-    A model to start training from: fresh at `topology`, or adapted from an
-    existing checkpoint's `state`, or both -- which means adapt the source into
-    the target shape.
-
-    The CLI reads the file; this takes the state dict. A problem module has no
-    business knowing where checkpoints live, and passing the dict keeps
-    `pinn init --from` the only place that decides what a source file means.
+    A model to start training from: fresh at `topology`, adapted from an existing
+    `state`, or both, which adapts the source into the target shape. Taking the state
+    dict rather than a path keeps `pinn init --from` the only place that decides what
+    a source file means.
     """
     if state is None and topology is None:
         raise ValueError("pass at least one of state, topology")
@@ -558,9 +485,9 @@ def init_model(
         hidden, kinks = parse_topology(topology)
         value = DimensionlessValueFunction(ExplorationPremium(hidden, kinks=kinks))
 
-        # Both: topology is the TARGET shape, state the source to adapt into
-        # it. That is how a three_arm checkpoint becomes a drift one, and how
-        # its kink branch is kept or dropped.
+        # Both: topology is the *target* shape, state the source to adapt into it.
+        # That is how a three_arm checkpoint becomes a drift one, and how its kink
+        # branch is kept or dropped.
         if state is not None:
             value.premium.stitch(
                 {k.removeprefix("premium."): v for k, v in state.items()}
@@ -587,6 +514,8 @@ if __name__ == "__main__":
     from ..three_arm.model import ExplorationPremium as ThreeArm
 
     class _ZeroPremium(nn.Module):
+        """No premium at all, so the value is the bare commit envelope."""
+
         def forward(self, m_b: Tensor, *rest: Tensor) -> Tensor:
             return torch.zeros_like(m_b)
 
@@ -622,19 +551,9 @@ if __name__ == "__main__":
 
     assert smooth.kinks == 0 and torch.allclose(smooth(*state), u)
 
-    # THE graft: a three_arm checkpoint is one feature narrower, and at
-    # etahat = 0 the extra feature is exactly 0 and the cap collapses onto
-    # three_arm's. Close, NOT bitwise, since the softplus gate (2026-08-14):
-    # the source's relu gate and this class's soft one differ near the seam
-    # and the difference decays e^(-2k|r|) away from it.
-    #
-    # 1.0e-2 is MEASURED, not derived. The seam estimate (log2/k)^2 ~ 5e-3
-    # justified a tolerance of 6e-3, and the true max is 7.17e-3 -- stable to
-    # three digits across independent random inits, so the check was failing
-    # DETERMINISTICALLY rather than flaking, and had been since the gate
-    # landed. The derivation is loose by ~1.4x (the max is not attained at
-    # the seam); the invariant it guards -- graft is close, and the
-    # feature/cap/stitch chain below is exact -- is unaffected.
+    # *The* graft: a three_arm source is one feature narrower, and the anchor is
+    # close, *not* bitwise, because the two gates differ near the seam. The 1.0e-2
+    # tolerance is measured (true max 7.17e-3), not derived: doc section 9.
     three_arm = ThreeArm([32, 16])
     grafted = ExplorationPremium([32, 16])
     grafted.stitch(three_arm.state_dict())

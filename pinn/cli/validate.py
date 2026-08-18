@@ -11,7 +11,8 @@ import torch
 from pathlib import Path
 from torch import Tensor
 
-from ..problems.two_arm import init_model, sample_sobol
+from ..problems.two_arm.model import init_model
+from ..problems.two_arm.sample import sample_sobol
 
 
 @click.command()
@@ -24,15 +25,11 @@ from ..problems.two_arm import init_model, sample_sobol
     help="Checkpoint to validate.",
 )
 def main(in_path: Path) -> None:
-    """
-    The section 6 identities of kb/two_arm.md, on a two_arm checkpoint.
-    """
+    """The section 6 identities of kb/two_arm.md, on a two_arm checkpoint."""
     value = init_model(state=torch.load(in_path))
 
     def pde_residual(muhat: Tensor, tauhat: Tensor) -> Tensor:
-        """
-        v - max_alpha H, same closed-form max as the training loss.
-        """
+        """v - max_alpha H, same closed-form max as the training loss."""
         muhat = muhat.clone().requires_grad_(True)
         tauhat = tauhat.clone().requires_grad_(True)
 

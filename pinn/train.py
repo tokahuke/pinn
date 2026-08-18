@@ -14,7 +14,10 @@ from dataclasses import fields, is_dataclass
 from torch import Tensor
 
 type LearningRate = float | Iterator[float]
+"""A constant rate, or a generator handing out one rate per step."""
+
 type Objective = Callable[[nn.Module, int | None], Tensor]
+"""What the trainer minimises: `(model, iteration or None) -> loss`."""
 
 
 def train(
@@ -24,10 +27,9 @@ def train(
     verbose: bool = True,
 ) -> Iterator[float]:
     """
-    Adam on objective(model, iteration), yielding the loss after each step.
-    lr is a constant or a generator of per-step rates; a finite
-    generator ends the training when it runs out, otherwise endless and the
-    consumer decides when to stop (itertools.islice is your friend).
+    Adam on objective(model, iteration), yielding the loss after each step. `lr` is a
+    constant or a generator of per-step rates, and a finite generator ends the run;
+    otherwise this is endless and the consumer stops it (`itertools.islice`).
     """
     rates = itertools.repeat(lr) if isinstance(lr, (int, float)) else lr
     optimizer = torch.optim.Adam(model.parameters())
@@ -54,13 +56,10 @@ def train(
 
 def leaves(structure: object) -> Iterator[Tensor]:
     """
-    Every tensor in a structure of tensors, dataclasses and sequences, in a
-    stable order.
-
-    Problems hand their loss whatever shape suits them -- two_arm_drift five
-    bare tensors, the three-arm pair a Sample and two RidgeSamples. Walking
-    the structure is what lets one graphed trainer serve all of them without
-    a single loss signature changing.
+    Every tensor in a structure of tensors, dataclasses and sequences, in a stable
+    order. Problems hand their loss whatever shape suits them (five bare tensors, or a
+    Sample and two RidgeSamples), and walking the structure is what lets one graphed
+    trainer serve all of them without a loss signature changing.
     """
     if isinstance(structure, Tensor):
         yield structure
@@ -96,18 +95,10 @@ def train_graphed(
     refresh: int = 100,
 ) -> Iterator[float]:
     """
-    train(), but the step is captured as a cuda graph and replayed.
-
-    The step is dispatch-bound, not compute-bound -- measured 2026-08-11, a
-    three_arm step issues 47k aten calls and the gpu idles at 24%. Capture
-    turns those into one submission: 10x on an RTX 4090, and it survives
-    create_graph, which torch.compile explicitly does not.
-
-    Replay reruns the same tensor ADDRESSES, so the collocation cloud is a set
-    of fixed buffers refreshed every `refresh` steps rather than resampled
-    every step. That refresh doubles as the diagnostic step: it runs eagerly,
-    which is the only way the loss can print its breakdown, since a replay is
-    silent.
+    train(), but the step is captured as a cuda graph and replayed. The step is
+    dispatch-bound (47k aten calls, gpu 24% idle, 10x on an RTX 4090, 2026-08-11) and
+    capture survives create_graph, which torch.compile does not. Replay reuses tensor
+    **addresses**, so `draw()` refills fixed buffers every `refresh` eager steps.
     """
     static = clone(draw())
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, capturable=True)
@@ -125,7 +116,7 @@ def train_graphed(
     torch.cuda.current_stream().wait_stream(stream)
     graph = torch.cuda.CUDAGraph()
 
-    # zero_grad INSIDE the capture: backward accumulates, so without it every
+    # zero_grad **inside** the capture: backward accumulates, so without it every
     # replay would add to the previous replay's gradient.
     with torch.cuda.graph(graph):
         optimizer.zero_grad(set_to_none=False)
@@ -156,6 +147,8 @@ if __name__ == "__main__":
 
     @dataclass
     class _Pair:
+        """A two-tensor dataclass, to check that leaves() walks one."""
+
         left: Tensor
         right: Tensor
 

@@ -12,9 +12,10 @@ import torch
 from pathlib import Path
 from torch import Tensor
 
-from ..problems.two_arm import DimensionlessValueFunction, init_model
+from ..problems.two_arm.model import DimensionlessValueFunction, init_model
 
 TAUHAT = 0.1
+"""The tauhat every slice is cut at."""
 
 muhat_axis = torch.linspace(1e-3, 2.5, 301)
 tauhat_axis = torch.linspace(0.1, 4.0, 301)
@@ -74,9 +75,9 @@ def double_plot(
     vmax: float,
 ) -> plt.Axes:
     """
-    The house pattern: field over the (muhat, tauhat) window on the left, slice
-    at tauhat = TAUHAT on the right. Callers decorate the returned slice axis,
-    then save(ax, filename).
+    The house pattern: field over the (muhat, tauhat) window on the left, slice at
+    tauhat = TAUHAT on the right. Callers decorate the returned slice axis, then
+    save(ax, filename).
     """
     fig, (ax_field, ax_slice) = plt.subplots(
         1, 2, figsize=(12, 4.6), width_ratios=[1.15, 1]
@@ -101,6 +102,7 @@ def double_plot(
 
 
 def save(ax: plt.Axes, filename: str) -> None:
+    """Write the decorated figure into data/."""
     ax.figure.tight_layout()
     ax.figure.savefig(Path("data") / filename, dpi=150)
 
@@ -114,9 +116,7 @@ def save(ax: plt.Axes, filename: str) -> None:
     help="Checkpoint to plot.",
 )
 def main(in_path: Path) -> None:
-    """
-    Render premium, policy, and residual as field-and-slice pngs in data/.
-    """
+    """Render premium, policy, and residual as field-and-slice pngs in data/."""
     value = init_model(state=torch.load(in_path))
 
     with torch.no_grad():

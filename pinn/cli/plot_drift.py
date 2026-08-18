@@ -17,21 +17,30 @@ import torch
 from pathlib import Path
 from torch import Tensor
 
-from ..problems.two_arm_drift import DimensionlessValueFunction
+from ..problems.two_arm_drift.model import DimensionlessValueFunction
 from ..problems.two_arm_drift.sample import ETAHAT_MAX, PRIOR_FLOOR
 
-# Field etahat: deep in the law's high-drift decades, where the ceiling
-# binds hardest. TAUHAT is low enough that 2 etahat tauhat <= 1 for the
-# whole family.
 ETAHAT = 10.0
-FAMILY = [0.0, 0.1, 1.0, 10.0, 30.0]
-TAUHAT = 0.01
+"""
+The field's etahat: deep in the law's high-drift decades, where the ceiling binds
+hardest.
+"""
 
-# tauhat stops AT the ceiling: above it the drift drains precision faster than
-# any allocation buys it, nothing is sampled there and the net extrapolates.
+FAMILY = [0.0, 0.1, 1.0, 10.0, 30.0]
+"""The etahat values the right-hand slice draws, 0.0 being the two_arm reference."""
+
+TAUHAT = 0.01
+"""The tauhat every slice is cut at, low enough that 2 etahat tauhat <= 1 for FAMILY."""
+
 CEILING = 1.0 / (2.0 * ETAHAT)
+"""
+tauhat stops *at* the ceiling: above it the drift drains precision faster than any
+allocation buys it, nothing is sampled there and the net extrapolates.
+"""
 
 GRID = 301
+"""Field resolution, per axis."""
+
 z_axis = torch.linspace(1e-3, 3.0, GRID)
 tauhat_axis = torch.linspace(PRIOR_FLOOR, CEILING, GRID)
 z_grid, tauhat_grid = torch.meshgrid(z_axis, tauhat_axis, indexing="xy")
@@ -42,10 +51,9 @@ def policy_and_residual(
     value: DimensionlessValueFunction, muhat: Tensor, tauhat: Tensor, etahat: float
 ) -> tuple[Tensor, Tensor]:
     """
-    alpha* and the SIMILARITY-chart residual, the one the loss grades.
-
-    Not the raw one: raw = similarity / tauhat**1.5, which varies by orders
-    across a panel, so no single colour scale means anything.
+    alpha* and the *similarity-chart* residual, the one the loss grades. Not the raw
+    one, `similarity / tauhat**1.5`, which varies by orders across a panel and leaves
+    no colour scale meaning anything.
     """
     drift = torch.full_like(muhat, etahat)
     left, best, _ = value.hamiltonian(muhat, tauhat, drift)
@@ -101,6 +109,7 @@ def double_plot(
 
 
 def save(ax: plt.Axes, filename: str) -> None:
+    """Write the decorated figure into data/."""
     ax.figure.tight_layout()
     ax.figure.savefig(Path("data") / filename, dpi=150)
 
@@ -115,9 +124,7 @@ def save(ax: plt.Axes, filename: str) -> None:
     help="Checkpoint to plot.",
 )
 def main(in_path: Path) -> None:
-    """
-    Render premium, policy, and residual for a two_arm_drift checkpoint.
-    """
+    """Render premium, policy, and residual for a two_arm_drift checkpoint."""
     value = DimensionlessValueFunction.load(in_path)
     flat_tauhat = tauhat_grid.flatten()
     flat_muhat = z_grid.flatten() / flat_tauhat.sqrt()
@@ -179,7 +186,7 @@ def main(in_path: Path) -> None:
         )
         (slope,) = torch.autograd.grad(ridge_u.sum(), ridge_muhat)
         below = (policies[etahat] < 1.0 - 1e-6).nonzero()
-        edge = int(below[-1]) + 1 if len(below) else len(slice_z)
+        edge = int(below[-1]) + 1 if len(below) > 0 else len(slice_z)
         commit = float(slice_z[edge]) if edge < len(slice_z) else float("nan")
         print(
             f"{etahat:>8} {2.0 * etahat * TAUHAT:>10.3f} {float(u[0]):>9.4f}"

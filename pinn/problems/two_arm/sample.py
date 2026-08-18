@@ -12,17 +12,22 @@ from torch.quasirandom import SobolEngine
 
 from ...utils import decade_scale, exponential
 
-# The floor keeps tauhat away from the singular corner: numerical stability
-# ONLY, no prior baked in -- the net trains general down to priors ~30 sd
-# wide. No real experiment starts more agnostic than that, and each decade
-# below costs another 100x in PDE stiffness (1/tauhat**2 in the residual)
-# for territory nobody visits.
-# SCALE_DECADES is the log10 range of the scale spreading tauhat mass across
-# decades (an Exp tail alone would leave the low decades unsampled).
 PRIOR_FLOOR = 1e-3
+"""
+Keeps `tauhat` off the singular corner: numerical stability *only*, with no prior
+baked in, since the net trains general down to priors ~30 sd wide. No real experiment
+starts more agnostic than that, and each decade below costs another 100x in PDE
+stiffness (`1/tauhat**2` in the residual) for territory nobody visits.
+"""
+
 SCALE_DECADES = 3.0
+"""
+The log10 range of the scale that spreads `tauhat` mass across decades. An Exp tail
+alone would leave the low decades unsampled.
+"""
 
 _SOBOL = SobolEngine(dimension=3, scramble=True)
+"""The one scrambled sequence every interior draw continues."""
 
 
 def _tauhat(u_scale: Tensor, u_tail: Tensor) -> Tensor:
@@ -37,11 +42,9 @@ def _tauhat(u_scale: Tensor, u_tail: Tensor) -> Tensor:
 
 def sample_sobol(n: int) -> tuple[Tensor, Tensor]:
     """
-    Scrambled Sobol points pushed through the long-tail law: tauhat from
-    _tauhat, muhat ~ Exp(mean 2 / sqrt(tauhat)) given tauhat (the cloud
-    tracks the corridor at every information level). Low-discrepancy:
-    grid-grade spread with no clumps, in any dimension. Successive calls
-    continue one sequence, so coverage keeps refining across iterations.
+    Scrambled Sobol through the long-tail law: `tauhat` from `_tauhat`, then
+    `muhat ~ Exp(mean 2 / sqrt(tauhat))`, so the cloud tracks the corridor at every
+    information level. Successive calls continue one sequence, refining coverage.
     """
     t = _SOBOL.draw(n).clamp(1e-7, 1.0 - 1e-7)
     tauhat = _tauhat(t[:, 0], t[:, 1])
@@ -65,10 +68,8 @@ if __name__ == "__main__":
     assert (muhat > 0).all() and (tauhat >= PRIOR_FLOOR).all()
     assert (sample_ridge(100) >= PRIOR_FLOOR).all()
 
-    # The decades are actually covered: real mass near 1, near the floor, and
-    # in the far tail.
-    # Far-tail expectation ~1e-3: the log-spread scale only shrinks, so mass
-    # beyond 10 is ~7x thinner than under the pre-general Exp law.
+    # The decades are actually covered: real mass near 1, near the floor, and in the
+    # far tail, where the log-spread scale only shrinks and leaves ~1e-3 beyond 10.
     for low, high, at_least in [(1e-3, 1e-2, 0.03), (0.5, 2.0, 0.1), (10.0, 1e9, 5e-4)]:
         fraction = ((tauhat > low) & (tauhat < high)).float().mean().item()
 

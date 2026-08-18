@@ -13,36 +13,27 @@ from pathlib import Path
 from torch import Tensor
 from typing import Self
 
-from ..problems.two_arm import DimensionlessValueFunction, ValueFunction
+from ..problems.two_arm.model import DimensionlessValueFunction, ValueFunction
 from .harness import Params, Policy, Run, Runner, optimal_deadline
 
-# The champion checkpoint the Pinn policy plays; repo-root relative, like
-# every other script's data path.
 CHECKPOINT = Path("data") / "two_arm.pt"
+"""The champion the Pinn policy plays, repo-root relative like every other data path."""
 
-# The weakest prior the champion is trusted at, in dimensionless precision.
-# 1e-3, the sampler's own PRIOR_FLOOR, so the guard no longer clamps inside
-# the training support at all.
-#
-# It was 1e-2 until 2026-08-13, guarding a low-tauhat corner where L_ab went
-# negative at the ridge and the policy committed on no evidence. That corner
-# is gone: the champion of that date satisfies pairwise positivity on 100.0%
-# of states and full concavity on 99.9%. Re-measured on the CURRENT drift
-# champion, 3000 paired reps at production parameters, loosening 1e-2 -> 1e-3
-# CUT harsh-drift regret by 62% (-38,753 +/- 3,591) and bought 3.6x the
-# evidence, and changed nothing in the deployment world (+361 +/- 601, a CI
-# covering zero). The 2026-08-10 measurement that made 1e-2 load-bearing said
-# the opposite on both counts; it was taken against a checkpoint since
-# replaced by one 39x better, and the crutch had become the injury.
 _FLATTEST_TAUHAT = 1e-3
+"""
+The weakest prior the champion is trusted at, in dimensionless precision: the
+sampler's own PRIOR_FLOOR, so the guard does not clamp inside the training support.
+Measured 2026-08-13, and re-measure it whenever the champion changes
+(kb/arena_results.md, the prior floor).
+"""
 
 
 @cache
 def _champion() -> DimensionlessValueFunction:
     """
-    One load per process: the arena constructs a fresh policy per run, and
-    the checkpoint (plus its feature-scale calibration draw) must not be
-    re-read every time. Read-only sharing -- nothing here trains.
+    One load per process: the arena constructs a fresh policy per run, and the
+    checkpoint (plus its feature-scale calibration draw) must not be re-read every
+    time. Read-only sharing, since nothing here trains.
     """
     return DimensionlessValueFunction.load(CHECKPOINT)
 
@@ -69,12 +60,10 @@ def observe(
     runner: Runner, allocation: Tensor, deltas: Tensor
 ) -> tuple[Tensor, Tensor]:
     """
-    One epoch's evidence: a noisy estimate of the contrast at the precision
-    the split bought, alpha_0 alpha_1 / sigma^2.
-
-    A vertex rep buys nothing: it consumes no draw (the mask skips its
-    cursor) and reads zero precision, which the precision-weighted update
-    multiplies away.
+    One epoch's evidence: a noisy estimate of the contrast at the precision the split
+    bought, alpha_0 alpha_1 / sigma^2. A vertex rep buys nothing, consuming no draw
+    (the mask skips its cursor) and reading zero precision, which the
+    precision-weighted update multiplies away.
     """
     precision = (allocation[:, 0] * allocation[:, 1]).double() / runner.params.sigma**2
     live = precision > 0.0
@@ -84,6 +73,7 @@ def observe(
 
 
 def _split(treatment: Tensor) -> Tensor:
+    """A treatment share as a (reps, 2) simplex row."""
     return torch.stack((1.0 - treatment, treatment), dim=1).float()
 
 
@@ -116,6 +106,7 @@ class Bayesian(Policy):
 
     @property
     def mean(self) -> Tensor:
+        """Posterior mean of delta; 0 before any evidence."""
         live = self.total_precision > 0.0
 
         return torch.where(
@@ -124,6 +115,7 @@ class Bayesian(Policy):
 
     @property
     def z(self) -> Tensor:
+        """The posterior mean in posterior-standard-deviation units."""
         live = self.total_precision > 0.0
 
         return torch.where(
@@ -132,9 +124,7 @@ class Bayesian(Policy):
 
     @property
     def prob_positive(self) -> Tensor:
-        """
-        P(delta > 0) under the posterior.
-        """
+        """P(delta > 0) under the posterior."""
         return 0.5 * torch.special.erfc(-self.z / sqrt(2.0))
 
 
@@ -189,9 +179,11 @@ class ZTest(Bayesian):
     # ponytail: fixed nominal level, no alpha spending. Swap `threshold` for an
     # O'Brien-Fleming or Pocock boundary in `count` if the peeking cost matters.
     p_value: float = 0.05
+    """Two-sided nominal level the null is tested at, every epoch."""
 
     @cached_property
     def threshold(self) -> float:
+        """The |z| that rejects at `p_value`, two-sided."""
         return float(torch.special.ndtri(torch.tensor(1.0 - self.p_value / 2.0)))
 
     def propose(self) -> Tensor:
@@ -202,15 +194,14 @@ class ZTest(Bayesian):
 
 class Pinn(Bayesian):
     """
-    The trained two_arm HJB policy: the arena's optimal-policy ceiling,
-    mapped onto arena units with rate gamma = 1 - rho (exact is -log rho,
-    O(gamma^2) apart). Commits are exact vertices of the simplex max, so the
-    arena's absorbing border triggers honestly.
+    The trained two_arm HJB policy: the arena's optimal-policy ceiling, mapped onto
+    arena units with rate gamma = 1 - rho (exact is -log rho, O(gamma^2) apart).
+    Commits are exact vertices of the simplex max, so the arena's absorbing border
+    triggers honestly.
 
-    The prior is a POLICY PARAMETER, not environment knowledge: prior_std is
-    the prior standard deviation on delta, in the arena's own units. None
-    means the flattest prior the checkpoint supports, computed per
-    environment -- the near-flat entrant, legal against the prior-blind zoo.
+    The prior is a **policy parameter**, not environment knowledge: prior_std is its
+    standard deviation on delta in arena units, and None means the flattest prior the
+    checkpoint supports, which is legal against the prior-blind zoo.
     """
 
     def __init__(
@@ -246,6 +237,7 @@ class Pinn(Bayesian):
 
 
 def demo() -> None:
+    """Each policy reaches the border its docstring claims, on a clear winner."""
     import pinn.arena.two_arm as problem
 
     params = Params(

@@ -14,37 +14,32 @@ from torch import Tensor
 
 @dataclass
 class Maximum:
-    """
-    The max value of f over [0, 1] and the point x attaining it.
-    """
+    """Where a quadratic tops out on [0, 1]."""
 
     value: Tensor
+    """The maximum value of f."""
+
     x: Tensor
+    """The point attaining it."""
 
 
 def maximize_quadratic(c_xx: Tensor, c_x: Tensor) -> Maximum:
     """
-    Maximize the quadratic
-
-        f(x) = c_xx x^2 + c_x x
-
-    over the interval [0, 1], elementwise over batched coefficients.
-
-    The max can only sit at the interior stationary point or at an endpoint.
-    Evaluate all three candidates and take the biggest: no case analysis on
-    curvature signs, convex vertices simply lose. Every candidate is clamped
-    into the interval before evaluation, so a garbage vertex is a valid lower
-    bound that loses the argmax; it can never inflate the answer. Selection is
-    by gather, whose backward zeroes every unselected row.
+    Maximize `f(x) = c_xx x^2 + c_x x` over [0, 1], elementwise. The max sits at the
+    stationary point or an endpoint, so all three candidates are clamped in and the
+    biggest wins: a garbage vertex loses rather than inflating the answer.
     """
 
     def f(x: Tensor) -> Tensor:
+        """The quadratic at x."""
         return c_xx * x**2 + c_x * x
 
     def finite(denominator: Tensor) -> Tensor:
-        # Only prevents literal division by zero; near-degenerate denominators
-        # still pass and produce a garbage vertex, which the clamp-and-lose
-        # argument above absorbs.
+        """
+        The denominator with exact zeros replaced, which only prevents literal
+        division by zero. Near-degenerate denominators still pass and produce a
+        garbage vertex, which the clamp-and-lose argument above absorbs.
+        """
         return denominator.masked_fill(denominator.abs() < 1e-12, 1.0)
 
     x_vertex = (-c_x / (2.0 * finite(c_xx))).clamp(0.0, 1.0)

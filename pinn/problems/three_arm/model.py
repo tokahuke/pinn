@@ -12,27 +12,24 @@ from pathlib import Path
 from torch import Tensor
 from typing import Self
 
-from ...net import DeclaresTopology, GainedTanh, parse_topology
+from ...net import DeclaresTopology, DimensionlessValue, GainedTanh, parse_topology
 from ...net import read_features, read_topology
 from ...utils import nu2
 from .sample import Sample
 from .simplex import Maximum, maximize_quadratic
 
-# Width of the feature stack in ExplorationPremium.forward.
 FEATURE_COUNT = 15
+"""Width of the feature stack that `ExplorationPremium.forward` builds."""
 
 
 class ExplorationPremium(DeclaresTopology):
     """
     The premium net over the fundamental wedge.
 
-    Plain function on the wedge, no symmetry machinery (fold + wall losses
-    carry S3); the feature list in forward; one GainedTanh MLP over the
-    stacked features, Xavier-tanh init, shallow profile; the free-information
-    envelope of doc section 13 multiplying the relu-squared rational response
-    (relu(r)**2 / (1 + relu(r)**2)).
-    Warm-starting from the two_arm champion is deferred to v2 by the
-    one-variable-at-a-time rule.
+    Plain function on the wedge, no symmetry machinery (fold + wall losses carry
+    S3); the feature list in forward; one GainedTanh MLP over the stacked
+    features, Xavier-tanh init, shallow profile; the free-information envelope of
+    doc section 13 multiplying the rational response of kb section 19.1.
     """
 
     def __init__(self, hidden: list[int], kinks: int = 0) -> None:
@@ -58,23 +55,13 @@ class ExplorationPremium(DeclaresTopology):
             layers.append(linear)
             layers.append(GainedTanh(sizes[i + 1]))
 
-        # Linear head (final GainedTanh sliced off): the response is mapped
-        # through relu(r)**2 / (1 + relu(r)**2) in forward, which both
-        # confines u inside the proven bound and builds in the free-boundary
-        # regularity.
+        # Linear head, the final GainedTanh sliced off: forward maps the
+        # response through the rational squared relu (kb section 19.1).
         self.net = nn.Sequential(*layers[:-1])
 
-        # Kink units: parallel saturated relu(.)**2 primitives added to the
-        # response -- movable curvature jumps for the free-boundary junction
-        # (the blob), which tanh ridges cannot synthesize cheaply. Each unit
-        # is y/(1+y), y = relu(.)**2: same curvature-jump regularity at the
-        # crease, but bounded output, so the branch is architecturally bad at
-        # painting the smooth bulk and cannot colonize it in from-scratch
-        # co-training (observed 2026-08-06 with bare relu**2: the branch
-        # outgrew the tanh stack early and took half the field, 2 orders
-        # worse). Zero-init output layer: stitched onto a trained checkpoint,
-        # the branch contributes exactly 0 at step 0, so training resumes
-        # from the checkpoint's function.
+        # Movable curvature-jump primitives for the free-boundary junction, each
+        # bounded so it cannot colonize the smooth bulk, and zero-init so a graft
+        # is bit-exact at step 0 (kb section 19.2).
         self.kinks = kinks
 
         if kinks > 0:
@@ -83,23 +70,17 @@ class ExplorationPremium(DeclaresTopology):
             nn.init.zeros_(self.kink_out.weight)
             nn.init.zeros_(self.kink_out.bias)
 
-            # Alive start (the head-bias-1 lesson, one level down): a relu**2
-            # unit that is never active gets no gradient and never recovers;
-            # a positive bias opens every unit on a healthy slice of the
-            # cloud (observed 2026-08-06: default init left 3 of 8 dead).
+            # Alive start: a relu**2 unit that is never active never recovers,
+            # and default init left 3 of 8 dead (kb section 19.2).
             nn.init.constant_(self.kink_in.bias, 0.5)
 
         # Envelope scale, init 0: at scale exactly 1 the envelope is a proven
-        # upper bound on the true premium (doc section 13), so the whole
-        # solution starts inside the tanh range.
+        # upper bound (doc section 13), so the solution starts inside the tanh
+        # range.
         self.log_scale = nn.Parameter(torch.zeros(()))
 
-        # Xavier assumes unit-variance inputs; the raw feature stack breaks
-        # that by 10-100x under the general sampling law, railing the first
-        # tanh layer (measured 2026-08-05: 49% of units saturated, fatal for
-        # deep profiles whose later layers see only those units). Calibrate a
-        # fixed per-feature scale from the law once at init; it is a buffer,
-        # so checkpoints carry it.
+        # A fixed per-feature scale, calibrated from the sampling law once at
+        # init and kept as a buffer so checkpoints carry it (kb section 19.3).
         self.register_buffer("feature_scale", torch.ones(FEATURE_COUNT))
 
         draw = Sample.draw(4096).fold()
@@ -114,12 +95,7 @@ class ExplorationPremium(DeclaresTopology):
         Adopt a smooth premium's parameters into this (possibly kinked) net.
 
         A source without a kink branch keeps this net's zero-init one, so the
-        graft is bit-exact at step 0 and training resumes from the source's
-        function. Anything else missing is a real mismatch and fails loudly.
-
-        Explicit, like both drift siblings. It used to happen implicitly inside
-        _load_from_state_dict, which meant every load silently tolerated absent
-        kink keys -- including the ones that were absent by accident.
+        graft is bit-exact at step 0; anything else missing fails loudly.
         """
         state = dict(source)
         mine = self.state_dict()
@@ -141,13 +117,9 @@ class ExplorationPremium(DeclaresTopology):
         The raw (uncalibrated) feature stack, plus the marginal precisions and
         correlation the envelope reuses.
         """
-        # Marginal precision per contrast, via Schur complements of T. NOT the
-        # raw diagonals: tau_bb is the precision GIVEN the other contrast --
-        # conditioning you do not have -- and overstates certainty exactly in
-        # the correlated states where the shared control matters. The b-c
-        # denominator is the sum of the a-b and a-c pair coordinates, positive
-        # on reachable states (harmonic combination when tau_bc = 0: verified
-        # 1/(1/2 + 1/3) = 6/5 in-session).
+        # Marginal precision per contrast, via Schur complements and **not** the
+        # raw diagonals, which are precisions *given* the other contrast and so
+        # overstate certainty exactly where the shared control matters.
         det = tau_bb * tau_cc - tau_bc**2
         precision_b = tau_bb - tau_bc**2 / tau_cc
         precision_c = tau_cc - tau_bc**2 / tau_bb
@@ -168,8 +140,8 @@ class ExplorationPremium(DeclaresTopology):
                 precision_b.log(),
                 precision_c.log(),
                 precision_bc.log(),
-                # z-scores: each mean in units of its own marginal sd -- the
-                # two_arm corridor-alignment win, once per contrast.
+                # z-scores: each mean in units of its own marginal sd, which is
+                # the two_arm corridor-alignment win, once per contrast.
                 m_b * precision_b.sqrt(),
                 m_c * precision_c.sqrt(),
                 m_bc * precision_bc.sqrt(),
@@ -201,45 +173,29 @@ class ExplorationPremium(DeclaresTopology):
             bumps = torch.relu(self.kink_in(scaled)) ** 2
             response = response + self.kink_out(bumps / (1.0 + bumps)).squeeze(-1)
 
-        # The EXACT free-information value E[max(0, theta_b, theta_c)] under
-        # the posterior (doc sections 13-14): a proven upper bound that is
-        # also the exact startup solution, correlation dependence included --
-        # the response tends to 1 as information goes to zero, so the floor
-        # decades ask nothing of the net (the nu-sum predecessor was 1.17x
-        # to 1.87x loose there and bred a never-explore attractor). No
-        # correlation clamp: k < 1 strictly on reachable states, and a clamp
-        # would kink d(envelope)/d(tau_bc) exactly where the corner needs it.
+        # The **exact** free-information value E[max(0, theta_b, theta_c)]: a
+        # proven upper bound and the exact startup solution, so the floor decades
+        # ask nothing of the net (doc section 13, kb section 19.1).
         envelope = self.log_scale.exp() * nu2(
             m_b, m_c, precision_b.rsqrt(), precision_c.rsqrt(), correlation
         )
 
-        # y/(1+y) with y = relu(r)**2 maps the response into [0, 1): both
-        # proven properties hold by construction, 0 <= u < envelope. The
-        # squared relu is the free-boundary trick (see two_arm's
-        # ExplorationPremium): committing all traffic to the leader observes
-        # no contrast, so v = commit solves the PDE exactly in the deep wedge
-        # and the true premium is exactly 0 there, pasting with u = u_m = 0
-        # and a jump only in the second derivative. relu(r)**2 has exactly
-        # that regularity on the learned zero set of r; a plain clip
-        # (first-derivative kink) would break the smooth pasting. Rational
-        # saturation, NOT tanh(y): tanh is float32-exactly 1 beyond r ~ 2.5
-        # and its gradient underflows, a cliff with no way back (the first
-        # three_arm start died there, r ~ 14 everywhere, only log_scale left
-        # trainable). y/(1+y) saturates with a polynomial tail, so gradients
-        # survive any overshoot.
+        # y/(1+y) with y = relu(r)**2 maps the response into [0, 1), so
+        # 0 <= u < envelope holds by construction and the free boundary keeps its
+        # curvature-jump regularity. Not tanh: kb section 19.1.
         response_squared = torch.relu(response) ** 2
 
         return envelope * response_squared / (1.0 + response_squared)
 
 
-class DimensionlessValueFunction(nn.Module):
+class DimensionlessValueFunction(DimensionlessValue):
     """
     The thing training grades: v = max(0, m_b, m_c) + u. The commit envelope
-    carries all three kinks (hand-written relu-of-max); the premium net stays
-    smooth, exactly the two_arm division of labor. Units rho = sigma = 1,
-    which is the dimensionless form (doc section 11), and the premium is
-    only trained on the fundamental wedge -- deployment goes through
-    ValueFunction, which papers over both cuts.
+    carries all three kinks (hand-written relu-of-max) while the premium net
+    stays smooth, exactly the two_arm division of labor. Units rho = sigma = 1,
+    which is the dimensionless form (doc section 11), and the premium is only
+    trained on the fundamental wedge. Deployment goes through `ValueFunction`,
+    which papers over both cuts.
     """
 
     def __init__(self, premium: nn.Module) -> None:
@@ -250,10 +206,9 @@ class DimensionlessValueFunction(nn.Module):
     @classmethod
     def load(cls, path: Path, kinks: int = 0) -> Self:
         """
-        A trained checkpoint as a model, architecture inferred from the state
-        dict (hidden widths from the premium net's weight shapes; a stored
-        kink branch keeps its width). `kinks` only sizes a first-time stitch
-        onto a checkpoint that has none.
+        A trained checkpoint as a model, at the architecture the checkpoint
+        DECLARES (`read_topology`, never inferred from weight shapes). `kinks`
+        only sizes a first-time stitch onto a checkpoint that has none.
         """
         state = torch.load(path)
         hidden, kinks = read_topology(state)
@@ -261,6 +216,13 @@ class DimensionlessValueFunction(nn.Module):
         value.load_state_dict(state)
 
         return value
+
+    def bind(self, rho: float, sigma: float) -> ValueFunction:
+        """
+        This net tied to one experiment, which is what makes it usable: means
+        and precisions go in and come back in your own units.
+        """
+        return ValueFunction(self, rho, sigma)
 
     def forward(
         self, m_b: Tensor, m_c: Tensor, tau_bb: Tensor, tau_bc: Tensor, tau_cc: Tensor
@@ -274,18 +236,9 @@ class DimensionlessValueFunction(nn.Module):
     ) -> tuple[Tensor, Maximum, tuple[Tensor, Tensor, Tensor]]:
         """
         The HJB's two sides on wedge states: the value v and the maximized
-        Hamiltonian (doc section 10). Pairwise learning numbers: for pair
-        direction dir, w = T^{-1} dir, and L = mean-diffusion Ito term
-        (1/2) w' D2m(v) w plus the precision-drift term (dir-form on dv/dT);
-        H(b, c) = b (m_b + l_ab) + c (m_c + l_ac) - l_ab b^2 - l_ac c^2
-        + (l_bc - l_ab - l_ac) b c, handed to plain calculus in
-        triangle-quadratic coefficients. Everything is graph-connected to the
-        premium's parameters, so subsolution_loss grades v - best.value and policy
-        reads the argmax off the same derivation.
-
-        Returns the learning numbers (l_ab, l_ac, l_bc) as well: they carry
-        the Hamiltonian's Hessian, and the loss grades its concavity along
-        sampled contrast directions (subsolution_loss).
+        Hamiltonian (doc section 10), plus the pairwise learning numbers, which
+        carry the Hamiltonian's Hessian and so its concavity. One derivative
+        chain, graph-connected to the premium, serves loss and policy alike.
         """
         m_b = m_b.detach().requires_grad_(True)
         m_c = m_c.detach().requires_grad_(True)
@@ -319,6 +272,7 @@ class DimensionlessValueFunction(nn.Module):
         det = tau_bb * tau_cc - tau_bc**2
 
         def mean_diffusion(d_b: Tensor, d_c: Tensor) -> Tensor:
+            """The Ito term (1/2) d' D2m(v) d along one pair direction."""
             return 0.5 * (d_b**2 * v_mbmb + 2.0 * d_b * d_c * v_mbmc + d_c**2 * v_mcmc)
 
         l_ab = mean_diffusion(tau_cc / det, -tau_bc / det) + v_tbb
@@ -352,13 +306,11 @@ class ValueFunction(nn.Module):
     """
     Deployment-facing value: real units in and out, any reachable state.
 
-    Wraps a trained DimensionlessValueFunction with the doc section 11
-    readout dictionary -- mhat = m / (sigma sqrt(rho)), tauhat = rho sigma^2
-    tau, V = (sigma / sqrt(rho)) vhat -- and folds arbitrary states into the
-    fundamental wedge for the premium (S3-invariant, doc section 6), keeping
-    the commit term in physical labels. States must still be reachable
-    (tau_bc <= 0, pair coordinates nonnegative); rho = sigma = 1 on wedge
-    states recovers the dimensionless form exactly.
+    Wraps a trained `DimensionlessValueFunction` with the doc section 11 readout
+    dictionary and folds arbitrary states into the fundamental wedge for the
+    premium (S3-invariant, doc section 6), keeping the commit term in physical
+    labels. States must be reachable (tau_bc <= 0, pair coordinates nonnegative),
+    and rho = sigma = 1 on wedge states recovers the dimensionless form.
     """
 
     def __init__(
@@ -403,10 +355,10 @@ class ValueFunction(nn.Module):
         self, m_b: Tensor, m_c: Tensor, tau_bb: Tensor, tau_bc: Tensor, tau_cc: Tensor
     ) -> Tensor:
         """
-        The argmax allocation over physical arms, shape (n, 3) rows
-        (alpha_a, alpha_b, alpha_c): the dimensionless wedge policy, folded
-        in and un-permuted back through fold_ordered's relabel. Allocations
-        are dimensionless fractions, so only the inputs rescale.
+        The argmax allocation over physical arms, rows (alpha_a, alpha_b,
+        alpha_c): the wedge policy, folded in and un-permuted back through
+        fold_ordered's relabel. Allocations are fractions, so only inputs
+        rescale.
         """
         folded, order = self._fold(m_b, m_c, tau_bb, tau_bc, tau_cc)
         roles = self.dimensionless.policy(
@@ -421,11 +373,9 @@ def init_model(
 ) -> DimensionlessValueFunction:
     """
     A model to start training from: fresh at `topology`, or adapted from an
-    existing checkpoint's `state`. Exactly one of the two.
-
-    The CLI reads the file; this takes the state dict. A problem module has no
-    business knowing where checkpoints live, and passing the dict keeps
-    `pinn init --from` the only place that decides what a source file means.
+    existing checkpoint's `state`. Exactly one of the two. The CLI reads the
+    file and passes the dict, so `pinn init --from` stays the only place that
+    decides what a source file means.
     """
     if state is None and topology is None:
         raise ValueError("pass at least one of state, topology")
@@ -434,10 +384,9 @@ def init_model(
         hidden, kinks = parse_topology(topology)
         value = DimensionlessValueFunction(ExplorationPremium(hidden, kinks=kinks))
 
-        # Both: topology is the TARGET shape, state the source adapted into it
-        # -- how a kink branch is grafted onto a trained smooth net. stitch
-        # keeps this net's zero-init branch, so the graft is bit-exact at
-        # step 0.
+        # Both given: topology is the **target** shape and state the source
+        # adapted into it, which grafts a kink branch onto a trained smooth net,
+        # bit-exact at step 0 (kb section 19.2).
         if state is not None:
             value.premium.stitch(
                 {k.removeprefix("premium."): v for k, v in state.items()}
@@ -455,6 +404,8 @@ def init_model(
 if __name__ == "__main__":
 
     class _ZeroPremium(nn.Module):
+        """A premium that is identically zero, so v is the bare commit envelope."""
+
         def forward(self, m_b: Tensor, *rest: Tensor) -> Tensor:
             return torch.zeros_like(m_b)
 
@@ -483,18 +434,18 @@ if __name__ == "__main__":
 
     assert (u >= 0).all() and (u <= bound + 1e-6).all()
 
-    # Stitch identity: an old-format state (no kink keys) loaded into a
-    # kinked net is the same function -- the zero-init output layer keeps the
-    # branch silent -- and the branch's parameters are trainable.
+    # Stitch identity: a state without kink keys loaded into a kinked net is the
+    # same function, because the zero-init output layer keeps the branch silent,
+    # and the branch's parameters are still trainable.
     stitched = ExplorationPremium([32, 16], kinks=8)
     stitched.stitch(premium.state_dict())
 
     assert torch.allclose(stitched(*state), u)
     assert stitched.kink_out.weight.requires_grad
 
-    # The graft must keep declaring ITS OWN shape. The smooth source says
-    # kink_count = 0; letting that win would save a net whose declaration its
-    # own kink weights disprove, and the next load would fail on them.
+    # The graft must keep declaring **its own** shape. The smooth source says
+    # kink_count = 0, and letting that win would save a net whose declaration its
+    # own kink weights disprove, so the next load would fail on them.
     assert int(stitched.kink_count) == 8, int(stitched.kink_count)
     assert read_topology(DimensionlessValueFunction(stitched).state_dict()) == (
         [32, 16],

@@ -14,27 +14,32 @@ from torch.quasirandom import SobolEngine
 
 from ...utils import chi_squared_1, decade_scale, exponential, laplace
 
-# three_arm's constants, unchanged: the state law IS three_arm's, and drift
-# only clips it from above (see _precision_from_uniforms). Keeping the numbers
-# identical is what makes the low-etahat slice the static problem rather than
-# something adjacent to it.
 PRIOR_FLOOR = 1e-3
+"""
+three_arm's constants, unchanged, this one and the three below: the state law *is*
+three_arm's, and drift only clips it from above (see `_precision_from_uniforms`).
+Keeping the numbers identical is what makes the low-etahat slice the static problem
+rather than something adjacent to it.
+"""
+
 PRECISION_MEAN = 2.0
 SCALE_DECADES = 3.0
 MEAN_SCALE = 2.0
 
-# Absolute cap on the det ceiling as etahat -> 0 (two_arm_drift's TAUHAT_MAX,
-# det edition): the ceiling diverges as 1/etahat^2, and uncapped it put 17% of
-# the cloud beyond det ~ 1e2 (up to 3.8e12, measured 2026-08-09) -- decades
-# the static law never reaches (its max det ~ 8e2) and whose taus miscalibrate
-# feature_scale ~1000x on the raw tau features while railing grafted nets'
-# first tanh layer. 1e3 sits just above the static law's reach.
 DET_MAX = 1e3
+"""
+Absolute cap on the det ceiling as etahat -> 0 (two_arm_drift's TAUHAT_MAX, det
+edition), sitting just above the static law's reach: uncapped, the ceiling diverges
+as 1/etahat^2 and fills the cloud with decades nothing else visits (doc section 6).
+"""
 
-# etahat law, two_arm_drift's shape at 1/sqrt2 of its scale: two_arm's eta is a
-# contrast volatility and ours is per arm, so the same physical world sits
-# lower here (doc section 0).
 ETAHAT_SCALE = 14.0
+"""
+etahat law, two_arm_drift's shape at 1/sqrt2 of its scale, with the two below:
+two_arm's eta is a contrast volatility and ours is per arm, so the same physical
+world sits lower here (doc section 0).
+"""
+
 ETAHAT_DECADES = 4.0
 ETAHAT_MAX = 35.0
 
@@ -80,9 +85,7 @@ class Sample:
         return cls(m_b, m_c, tau_bb, tau_bc, tau_cc, etahat)
 
     def fold(self) -> Sample:
-        """
-        Roll the batch into the fundamental wedge; see fold_ordered.
-        """
+        """Roll the batch into the fundamental wedge; see `fold_ordered`."""
         return self.fold_ordered()[0]
 
     def fold_ordered(self) -> tuple[Sample, Tensor]:
@@ -137,9 +140,7 @@ class RidgeSample:
 
     @classmethod
     def control_tie(cls, n: int) -> RidgeSample:
-        """
-        Wall states on the control tie {m_b = 0}: the free mean is m_c <= 0.
-        """
+        """Wall states on the control tie {m_b = 0}: the free mean is m_c <= 0."""
         t = _SOBOL_WALL.draw(n).clamp(1e-7, 1.0 - 1.0e-7)
         etahat = _etahat(t[:, 6], t[:, 7])
         tau_bb, tau_bc, tau_cc = _precision_from_uniforms(
@@ -171,9 +172,7 @@ class RidgeSample:
 
 
 def _etahat(u_scale: Tensor, u_tail: Tensor) -> Tensor:
-    """
-    Decade-spread scale times an Exp tail, reaching 0 (the three_arm anchor).
-    """
+    """Decade-spread scale times an Exp tail, reaching 0 (the three_arm anchor)."""
     drawn = ETAHAT_SCALE * decade_scale(u_scale, ETAHAT_DECADES) * exponential(u_tail)
 
     return drawn.clamp(max=ETAHAT_MAX)
@@ -187,37 +186,10 @@ def _precision_from_uniforms(
     etahat: Tensor,
 ) -> tuple[Tensor, Tensor, Tensor]:
     """
-    Uniforms -> pairwise precisions -> precision entries: three_arm's law with
-    its additive PRIOR_FLOOR on the a-b and a-c pair coordinates, and the
-    drift ceiling imposed by capping the common scale.
-
-    Drift caps how much can ever be known: what you buy stops keeping up with
-    what the wandering destroys, and the cap has a shape, not just a size (doc
-    section 6). Its determinant is the part that is both provable and unchanged
-    by shuffling arm labels, so that is what is imposed here:
-
-        det T  <=  det T*  =  1 / (2 sqrt3 etahat^2)
-
-    Both fences are exact and neither is traded for the other: with the floor
-    in place det is a quadratic in the scale s, increasing in s,
-
-        det(s) = shape_det s^2
-               + PRIOR_FLOOR (shape_ab + shape_ac + 2 shape_bc) s
-               + PRIOR_FLOOR^2,
-
-    so clamping s at the root of det(s) = ceiling enforces the ceiling exactly
-    while the floor holds at every s. Where the cap does not bind this IS
-    three_arm's law term for term, which is the etahat -> 0 anchor.
-
-    The floor sits on the PAIR coordinates, not on det (the 2026-08-13 fence:
-    "the floor's stated purpose is det anyway" read three_arm wrong). det >=
-    PRIOR_FLOOR**2 admits states with one pair coordinate at 1e-5..1e-7, and
-    the learning numbers carry (tau/det)^2 -- 100x stiffer per decade below
-    the floor. Measured on the 2026-08-13 champion: such states were 18% of
-    the cloud carrying 98% of the pde loss (coefficients ~1e9 on second
-    derivatives, float32-ungradeable even for the exact solution), a loss
-    floor no net can descend; the same batch fenced at the floor graded 40x
-    lower.
+    Uniforms -> pairwise precisions -> precision entries: three_arm's law with its
+    additive PRIOR_FLOOR on the pair coordinates, plus the drift ceiling
+    `det T <= 1 / (2 sqrt3 etahat^2)`, imposed by capping the common scale. Why the
+    floor sits on the pair coordinates and not on det, measured: doc section 6.
     """
     shape_ab = chi_squared_1(u_ab)
     shape_ac = chi_squared_1(u_ac)
@@ -229,10 +201,9 @@ def _precision_from_uniforms(
         2.0 * SQRT3 * etahat.clamp_min((2.0 * SQRT3 * DET_MAX) ** -0.5) ** 2
     )
 
-    # The larger root of det(s) = ceiling, in the form that stays finite when
-    # a triple-near-zero shape sends both coefficients toward 0. excess > 0
-    # always: the ceiling bottoms out at 2.4e-4 (etahat 35), 240x the floor's
-    # det.
+    # The larger root of det(s) = ceiling, in the form that stays finite when a
+    # triple-near-zero shape sends both coefficients toward 0. excess > 0 always: the
+    # ceiling bottoms out at 2.4e-4 (etahat 35), 240x the floor's det.
     quad = shape_ab * shape_ac + shape_bc * (shape_ab + shape_ac)
     lin = PRIOR_FLOOR * (shape_ab + shape_ac + 2.0 * shape_bc)
     excess = ceiling_det - PRIOR_FLOOR**2
@@ -256,10 +227,9 @@ if __name__ == "__main__":
     assert draw.m_b.shape == draw.tau_bc.shape == draw.etahat.shape == (20000,)
     assert (draw.tau_bc <= 0).all()
 
-    # The stiffness fence, three_arm's: the a-b and a-c pair coordinates carry
-    # the additive floor at EVERY drift. Regression test for the det-only
-    # floor (see _precision_from_uniforms), whose sub-floor states carried 98%
-    # of the pde loss.
+    # The stiffness fence, three_arm's: the a-b and a-c pair coordinates carry the
+    # additive floor at *every* drift. Regression test for the det-only floor (see
+    # `_precision_from_uniforms`), whose sub-floor states carry 98% of the pde loss.
     assert (draw.tau_bb + draw.tau_bc >= PRIOR_FLOOR - 1e-6).all()
     assert (draw.tau_cc + draw.tau_bc >= PRIOR_FLOOR - 1e-6).all()
     assert (draw.etahat >= 0.0).all() and (draw.etahat <= ETAHAT_MAX).all()
@@ -270,29 +240,26 @@ if __name__ == "__main__":
     assert (det >= PRIOR_FLOOR**2 * 0.99).all(), det.min().item()
     assert (det <= DET_MAX * 1.001).all(), det.max().item()
 
-    # The ceiling, on the PHYSICAL quantity and with nothing subtracted off the
-    # left side -- subtracting the floor back out would only test that clamp
-    # clamps.
+    # The ceiling, on the *physical* quantity and with nothing subtracted off the left
+    # side: subtracting the floor back out would only test that clamp clamps.
     ratio = 2.0 * SQRT3 * draw.etahat**2 * det
 
-    # Exact in exact arithmetic -- the scale is clamped at the root of
-    # det(s) = ceiling. The slack is float32: det is a difference of similar
-    # numbers when the b-c pair dominates, which costs about four digits
-    # (three_arm's own det check is in float64 for the same reason).
+    # Exact in exact arithmetic, the scale being clamped at the root of
+    # det(s) = ceiling. The slack is float32: det is a difference of similar numbers
+    # when the b-c pair dominates, costing about four digits.
     assert (ratio <= 1.0 + 1e-3).all(), ratio.max().item()
 
-    # The ceiling CLIPS, it does not SIZE. Where drift is negligible nothing
-    # should sit on it; where drift is real most states should. Drawing a
-    # fraction OF the ceiling (until 2026-08-13) inverted this and inflated
-    # the whole low-drift slice.
+    # The ceiling *clips*, it does not *size*. Where drift is negligible nothing
+    # should sit on it; where drift is real most states should. Drawing a fraction
+    # *of* the ceiling inverts this and inflates the whole low-drift slice.
     quiet, loud = draw.etahat < 0.01, draw.etahat > 10.0
 
     assert (ratio[quiet] > 0.9).float().mean() < 0.01, "clip binds at etahat ~ 0"
     assert (ratio[loud] > 0.9).float().mean() > 0.4, "ceiling unreached under drift"
 
-    # And the quiet slice IS three_arm: same constants, ceiling inactive, so
-    # its det distribution must match. This is the regression test for the bug
-    # above, which put the median 1,250x out.
+    # And the quiet slice *is* three_arm: same constants, ceiling inactive, so its
+    # det distribution must match. This is the regression test for the failure above,
+    # which puts the median 1,250x out.
     from ..three_arm.sample import Sample as StaticSample
 
     static = StaticSample.draw(40000)

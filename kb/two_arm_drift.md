@@ -114,7 +114,7 @@ and the tauhat clock:
     dtauhat/dt = rho [ alpha(1-alpha) - etahat^2 tauhat^2 ]
 
 **Cost accounting.** +0 state, +1 parameter. The state is still
-`(muhat, tauhat)`; `etahat` is the third net input, so one checkpoint serves
+`(muhat, tauhat)`; `etahat` is the third net input, so one model serves
 every deployment.
 
 ## 5. Boundary conditions
@@ -348,6 +348,42 @@ Everything two_arm does carries over except the response's zero set:
   it, so any world whose winner can change within the horizon has `etahat` in
   the tens -- which is why an earlier law centred on 0.1 covered nothing that
   matters.
+
+### The etahat law: one coordinate, monotone (measured)
+
+`etahat` is drawn from ONE Sobol coordinate through a monotone map, so every
+batch carries the same etahat composition: a Sobol coordinate is near-uniform on
+[0, 1) within any batch, and a monotone map preserves that. No weights, no bins,
+no importance correction.
+
+It is not a stylistic choice. This family's per-band gradients are
+near-antiparallel and cancel ~96%, so a fluctuating composition leaves the
+surviving direction to chance. Measured batch-to-batch gradient cosine: 0.26
+under a two-coordinate law, 0.94 under this one.
+
+
+### Grafting: what `stitch` guarantees
+
+`ExplorationPremium.stitch` adopts another premium's parameters, and these are
+the rules that make `pinn init --from` safe:
+
+- A two_arm model is ONE FEATURE NARROWER. Pad the drift column of the
+  first layer with zeros and append its calibrated scale, keeping two_arm's
+  four. At `etahat = 0` the fifth feature is exactly 0 and the envelope
+  collapses onto `nu`, so the stitched net sees exactly two_arm's inputs and IS
+  the source, bitwise. The `model.py` self-check holds it.
+- WIDER targets graft function-preserving: the source block lands in the
+  leading slice, new OUTPUT units keep this net's fresh init, and every new
+  INPUT column is ZEROED so nothing new feeds the old path. The one-feature pad
+  is that same rule on the input dimension.
+- The shape buffers (`topology`, `kink_count`) always describe the TARGET,
+  never the source. Copying the source's declaration would make the net save a
+  shape its own weights disprove.
+- A source with no kink branch leaves this net's zero-init branch alone, so the
+  graft is bit-exact at step 0. Only the kink branch is defaulted, by name
+  rather than by a `kink_` prefix that would also catch `kink_count`; anything
+  else missing is a real mismatch and raises.
+
 
 ## 9. Verification
 

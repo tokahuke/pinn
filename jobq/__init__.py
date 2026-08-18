@@ -1,24 +1,20 @@
-"""
-The `jobq` command: run trainings on an ephemeral RunPod pod.
-"""
+"""The `jobq` command: run trainings on an ephemeral RunPod pod."""
 
 from __future__ import annotations
 
 import click
 
+from .backup import backup
 from .cp import cp
 from .down import down
 from .push import push
 from .run import run
-from .backup import backup
 from .up import up
 
 
 @click.group()
 def cli() -> None:
-    """
-    Poor man's job queue.
-    """
+    """Poor man's job queue."""
 
 
 cli.add_command(up)

@@ -347,7 +347,7 @@ z-preserving floor state (`tau_eff = max(tauhat, PRIOR_FLOOR)`, `muhat` scaled
 so `z` is held) while the envelope stays at the true state; the
 `sqrt(FLOOR/tauhat)` similarity amplitude cancels through `nu`'s homogeneity,
 so the premium continues self-similarly as the floor's own shape. It binds
-ONLY off the sampling law, so training and every trained checkpoint are
+ONLY off the sampling law, so training and every trained model are
 untouched BITWISE (champion pde 8.35e-6, pos_learning exactly 0), the
 sub-floor policy inherits the floor's positive learning content (alpha* 0.5
 down to tauhat 1e-4), and inputs never leave the trained support. Its cost is
@@ -408,7 +408,10 @@ Four design points, each measured rather than argued:
   residual of 1.8, 99.2% of it in the floor decade. Matching the units fixes
   the incentive. NOTE the inflation is also partly transient: at 3k iterations
   the matched-units run still read L 24.6, and by 350k it had receded to 21.8.
-- pos_learning is REMOVED, by proof rather than calibration. Where L_ab < 0
+- pos_learning is REMOVED, by proof rather than calibration. The CLIMB is what
+  makes the repair go the right way: the penalty alone would restore
+  feasibility by killing u, and only the pair admits the equilibrium
+  L_ab >= 0 WITH u > 0. Where L_ab < 0
   the Hamiltonian is convex in alpha, so max H = e^s z at a vertex, while
   v = e^s (z + g) with g >= 0 architectural -- the violation is then exactly
   u. A negative learning operator is infeasible wherever the premium is alive
@@ -450,4 +453,118 @@ muhat = 0, enough to hold BC1's slope, and is dead everywhere the cloud
 samples. Nothing was lost: a dead net cannot beat a live one on this objective
 (the -CLIMB * climb term makes a live total ~ -2.5e-4, the champion's climb of
 2476 times 1e-7, against a dead one of ~ +2e-7 -- ridge only), so
-best-EMA checkpointing is structurally safe here.
+best-EMA snapshotting is structurally safe here.
+
+### The two weights: how each was set, and how to read it going wrong
+
+`CLIMB_WEIGHT = 1e-7`. Violation and climb are both in natural units, so only
+their RATIO matters: the violation carries weight 1 and the climb weight is the
+single knob. A flat climb (the gate `u / nu`) instead lost the floor decade,
+where the violation's `tauhat**-1.5` reaches 3.2e4, because the net bought slack
+by inflating the learning number rather than fixing the value.
+
+Reading it wrong, either way: a violation that PLATEAUS means the weight is too
+high; a climb that SAGS below the champion's 2476 means it is too low, and
+feasibility is being bought by shrinking the premium.
+
+`SLACK_PRICE = 0.0`. The two sides of the residual are priced
+`(1 - SLACK_PRICE)` and `SLACK_PRICE`, summing to 1, so moving it reallocates
+between them without rescaling the objective. That is what keeps RIDGE_WEIGHT
+and every other weight calibrated against the residual valid across a sweep.
+It is the pinball loss at `q = 1 - SLACK_PRICE`: 0 is the pure subsolution
+objective, 0.5 is the symmetric two-sided loss in L1, and above 0.5 prefers
+supersolutions, which is the wrong side for a lower bound.
+
+Slack is priced at all because the climb is a global MEAN and so cannot say
+WHERE to climb: the net climbs where that is cheap and sags where it is not.
+Slack is undershoot, `v < max H`, which is also exactly what inflating `max H`
+produces, so pricing it charges for the learning-number inflation that is
+otherwise free. From scratch, ~35k iterations, against the polished champion's
+climb 2479 and mean learning number 5.44:
+
+    SLACK_PRICE    climb    L      overshoot   over%
+    0              1592    48.79    2.6e-4      5.8%
+    0.02           2487     5.18    9.1e-4      9.7%
+
+At 0 the premium sits 37% below `V*` and the Hamiltonian is 9x wrong while the
+overshoot metric looks BETTER, so the loss was being gamed rather than
+satisfied. 0 is the default here because this champion was polished at 0 from a
+converged two-sided net; 0.02 is for cold starts, annealed back to 0 to tighten
+the bound once the premium is up.
+
+## 11. The premium architecture: why each factor has its shape (2026-08-17)
+
+Moved here from `ExplorationPremium`'s docstring, which had grown to 43 lines.
+The class is
+
+    u = exp(log_scale) * nu(-muhat, tauhat**(-1/2)) * y / (1 + y),
+    y = relu(response)**2
+
+with `response` the linear head of a dense GainedTanh MLP on four features.
+
+### The envelope, and why the response saturates rationally
+
+`nu(-muhat, sd)` is the proven upper bound on the premium (kb/three_arm.md
+section 13, specialized to one challenger). The original `tauhat**(-1/2)`
+envelope is exactly its ridge slice, `nu(0, sd) = sd / sqrt(2 pi)`, so this
+form only adds the `muhat` decay that one lacked. Section 8 shows the bound is
+TIGHT at zero information, which is what makes `log_scale = 0` the
+asymptotically exact start.
+
+`y / (1 + y)` maps the head into [0, 1), so `0 <= u < envelope` is
+architectural rather than a loss term. NEVER `tanh` here: float32 `tanh(y)` is
+exactly 1 beyond `y ~ 2.5` and its gradient underflows, a one-way cliff with no
+route back (three_arm's first relu-squared start died there with `r ~ 14`
+everywhere). Rational saturation has a polynomial tail, so gradients survive
+overshoot.
+
+### The squared relu is the free-boundary trick
+
+In the commit region the true premium is exactly 0, since `v = muhat` solves
+the HJB there, and at the boundary the solution pastes smoothly: `u = u_m = 0`
+with a jump only in `u_mm` (the section 6 curvature law). `relu(r)**2` has
+exactly that regularity on the learned zero set of `r`, so the commit region is
+solved exactly and the curvature kink a smooth response would have to fake is
+built in instead.
+
+A plain clip was REJECTED: it kinks the FIRST derivative, which breaks smooth
+pasting.
+
+### Feature choices
+
+Four, all aligned with structures the solution actually has:
+
+- `log tauhat`, so every decade of precision gets equal resolution.
+- `muhat sqrt(tauhat)`, the posterior z-score; the corridor is a near-vertical
+  band in it.
+- `muhat tauhat`, the tail similarity coordinate; the far-field free boundary is
+  its level set ~ 1/2.
+- `muhat` itself.
+
+Kinky structures are near axis-aligned in this space, so the net buys them
+cheaply.
+
+FOURIER FEATURES ON z WERE REVERTED (4 sin/cos harmonics): the sinusoids
+imprinted their own level sets on the residual, doubled the exterior ripple, and
+even L-BFGS could not make the basis pay. Compare the section 6 note that a
+fifth `muhat * tauhat**0.75` feature does not help either -- both are attempts
+to hand the net a basis it already spans.
+
+### `-muhat`, never `-|muhat|`
+
+On the `muhat >= 0` domain the two are the same bound, but the abs puts a kink
+at exactly `muhat = 0`, which is where the ridge loss differentiates. Autograd's
+`sign(0) = 0` would then silently drop the envelope's one-sided slope and train
+BC1 against a derivative the `muhat > 0` side never sees. `nu` is smooth in its
+mean, so the smooth form keeps the premium smooth at the ridge.
+
+### Init
+
+Xavier with the tanh gain, since PyTorch's default is relu-flavored and ~4x too
+small for tanh here; plain gain on the linear head. Head bias 1 starts the net
+ALIVE everywhere, which matters because an all-dead `relu**2` net has zero loss
+gradient and never recovers (CLAUDE.md traps). Xavier also assumes unit-variance
+inputs, which the raw feature stack breaks under the general sampling law
+(first-layer tanh units rail; three_arm's model carries the measurement), so a
+fixed per-feature scale is calibrated from the law once at init and kept as a
+buffer, which puts it in the model file.

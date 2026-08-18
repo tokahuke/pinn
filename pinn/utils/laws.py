@@ -37,41 +37,30 @@ def laplace(u: Tensor) -> Tensor:
 
 def chi_squared_1(u: Tensor) -> Tensor:
     """
-    Chi-squared with 1 degree of freedom, i.e. the square of a standard normal.
-
-    The density DIVERGES at 0, so P(X < eps) ~ sqrt(eps) and tiny values are
-    favoured rather than coincidental. three_arm draws its pairwise precisions
-    this way so the startup corner -- all three channels near zero information
-    at once -- carries real sampling mass; under independent exponential tails
-    it was a ~1e-5 triple coincidence and the policy was garbage exactly there.
+    Chi-squared with 1 degree of freedom, the square of a standard normal. Its density
+    **diverges** at 0, so `P(X < eps) ~ sqrt(eps)` and tiny values are favoured rather
+    than coincidental: three_arm draws pairwise precisions this way to give the startup
+    corner real mass, where exponential tails leave a ~1e-5 triple coincidence.
     """
     return torch.special.ndtri(0.5 + 0.5 * u) ** 2
 
 
 def decade_scale(u: Tensor, decades: float) -> Tensor:
     """
-    A multiplicative scale spread over `decades` powers of ten, densest at 1
-    and reaching down: 10**(-decades * u**2).
-
-    The squared exponent is what makes it dense near 1 rather than uniform per
-    decade. Every problem multiplies its precision law by one of these so the
-    low-information decades get mass an exponential tail alone would miss.
+    A multiplicative scale spread over `decades` powers of ten, densest at 1 and
+    reaching down: `10**(-decades * u**2)`. The squared exponent is what makes it dense
+    near 1 rather than uniform per decade; every problem multiplies its precision law
+    by one so the low-information decades get mass an exponential tail would miss.
     """
     return torch.pow(10.0, -decades * u**2)
 
 
 def truncated_pareto(u: Tensor, low: float, high: float) -> Tensor:
     """
-    Log-uniform on [low, high]: a truncated Pareto at shape alpha = 0, whose
-    density is proportional to 1/x, i.e. equal mass in every decade.
-
-    MONOTONE in u, which is why it beats a product of two laws: a Sobol
-    coordinate is near-uniform within a batch, so a monotone map hands every
-    batch the same composition. Matters when the coordinate indexes a family
-    whose gradients partly cancel (two_arm_drift: batch-to-batch gradient
-    cosine 0.22 under a two-coordinate law, 0.94 under this one).
-
-    Reaches its bounds only in the limit, so it welds no point mass to either.
+    Log-uniform on [low, high]: a truncated Pareto at shape alpha = 0, equal mass per
+    decade, reaching its bounds only in the limit so neither carries point mass.
+    **Monotone** in u, which beats a product of two laws because a Sobol coordinate is
+    near-uniform within a batch (gradient cosine 0.22 two-coordinate, 0.94 here).
     """
     return low * (high / low) ** u
 
@@ -101,7 +90,7 @@ if __name__ == "__main__":
     assert scale.max().item() <= 1.0 and scale.min().item() >= 1e-3
     assert scale.gt(0.1).float().mean().item() > 0.5
 
-    # truncated_pareto: bounded, log-uniform, and equal mass per decade -- the
+    # truncated_pareto: bounded, log-uniform, and equal mass per decade, so the
     # three decades of [1e-3, 1] must each carry a third of the draw.
     pareto = truncated_pareto(u, 1.0e-3, 1.0)
 

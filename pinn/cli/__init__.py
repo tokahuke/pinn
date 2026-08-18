@@ -18,9 +18,7 @@ from .validate import main as validate
 
 @click.group()
 def cli() -> None:
-    """
-    Physics-informed nets for Bayesian allocation.
-    """
+    """Physics-informed nets for Bayesian allocation."""
 
 
 cli.add_command(init)

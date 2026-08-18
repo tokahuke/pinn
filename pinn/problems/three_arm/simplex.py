@@ -13,39 +13,39 @@ from torch import Tensor
 
 @dataclass
 class Maximum:
-    """
-    The max value of f over the triangle and the point (x, y) attaining it.
-    """
+    """A quadratic's maximum over the triangle, and the point where it sits."""
 
     value: Tensor
+    """The largest value f takes on the triangle."""
+
     x: Tensor
+    """First coordinate of the point attaining it."""
+
     y: Tensor
+    """Second coordinate of the point attaining it."""
 
 
 def maximize_quadratic(
     c_xx: Tensor, c_yy: Tensor, c_xy: Tensor, c_x: Tensor, c_y: Tensor
 ) -> Maximum:
     """
-    Maximize the quadratic
-
-        f(x, y) = c_xx x^2 + c_yy y^2 + c_xy x y + c_x x + c_y y
-
-    over the triangle {x >= 0, y >= 0, x + y <= 1}, elementwise over batched
-    coefficients.
-
-    The max of a quadratic over a triangle can only sit at the interior
-    stationary point, at an edge's stationary point, or at a corner. Evaluate
-    all seven candidates and take the biggest: no case analysis on curvature
-    signs, saddle points and valley edges simply lose.
+    Maximize f(x, y) = c_xx x^2 + c_yy y^2 + c_xy x y + c_x x + c_y y over the
+    triangle {x >= 0, y >= 0, x + y <= 1}, elementwise over batched coefficients.
+    The max sits at the interior stationary point, at an edge's, or at a corner
+    (doc section 10): evaluate all seven and take the biggest, so saddles lose.
     """
 
     def f(x: Tensor, y: Tensor) -> Tensor:
+        """The quadratic itself, elementwise over the batch."""
         return c_xx * x**2 + c_yy * y**2 + c_xy * x * y + c_x * x + c_y * y
 
     def finite(denominator: Tensor) -> Tensor:
-        # Only prevents literal division by zero; near-degenerate denominators
-        # still pass and produce garbage candidates. Correctness does not rest
-        # here -- see the candidate-stack comment below.
+        """
+        The denominator with its exact zeros replaced by 1, which only prevents
+        literal division by zero. Near-degenerate denominators still pass and
+        produce garbage candidates; correctness does not rest here, but on the
+        candidate stack below.
+        """
         return denominator.masked_fill(denominator.abs() < 1e-12, 1.0)
 
     zeros = torch.zeros_like(c_x)
@@ -74,17 +74,9 @@ def maximize_quadratic(
         (2.0 * c_yy - c_xy - c_x + c_y) / (2.0 * finite(c_xx + c_yy - c_xy))
     ).clamp(0.0, 1.0)
 
-    # Candidates: interior, 3 edges, 3 corners -- corners go through f too:
-    # f(0,0) = 0, f(1,0) = c_xx + c_x, f(0,1) = c_yy + c_y.
-    #
-    # Why garbage candidates cannot hurt: every candidate is evaluated through
-    # f at a point clamped into the triangle, and any such evaluation is a
-    # valid lower bound on the max -- a bad candidate gives a poor bound and
-    # loses the argmax, it can never inflate the answer. Where the interior
-    # solve degrades (det ~ 0, a parabolic cylinder), the true max sits on the
-    # boundary, served by candidates that never touch det. Selection is by
-    # gather, whose backward zeroes every unselected row, so ill-conditioned
-    # gradients in losing candidates never reach the parameters.
+    # Candidates: interior, 3 edges, 3 corners, all through f. A degraded
+    # candidate loses the argmax rather than inflating it, and gather's backward
+    # keeps its gradients off the parameters (kb section 19.6).
     x_candidates = torch.stack([x_interior, x_leg, zeros, x_hyp, zeros, ones, zeros])
     y_candidates = torch.stack(
         [y_interior, zeros, y_leg, 1.0 - x_hyp, zeros, zeros, ones]

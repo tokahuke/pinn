@@ -2,11 +2,11 @@
 Diagnostic probes for a three_arm checkpoint: wedge slices, tau lines, and the
 symmetric-point allocation table, one set of pngs per checkpoint in data/.
 
-Convention: "correlated" means tau_bc = -tau/2, the correlation a shared
-control arm induces -- the arm-symmetric state where the allocation must tend
-to (1/3, 1/3, 1/3). tau_bc = 0 means the control is known perfectly (the
-off-diagonal of the difference covariance is the control variance), a weird
-state for this problem; probes do not use it.
+Convention: "correlated" means tau_bc = -tau/2, the correlation a shared control arm
+induces, which is the arm-symmetric state where the allocation must tend to
+(1/3, 1/3, 1/3). tau_bc = 0 means the control is known perfectly (the off-diagonal of
+the difference covariance is the control variance), a weird state for this problem;
+probes do not use it.
 """
 
 from __future__ import annotations
@@ -16,13 +16,13 @@ import matplotlib.pyplot as plt
 import torch
 
 from pathlib import Path
-from torch import Tensor
-
-from pinn.problems.three_arm import ExplorationPremium, DimensionlessValueFunction
+from pinn.problems.three_arm.model import ExplorationPremium, DimensionlessValueFunction
 from pinn.problems.three_arm.simplex import maximize_quadratic
 from pinn.utils import nu
+from torch import Tensor
 
 CORRELATION = -0.5
+"""tau_bc as a share of tau: the correlation a shared control arm induces."""
 
 
 def probe(
@@ -34,8 +34,8 @@ def probe(
     tau_cc: Tensor,
 ) -> dict[str, Tensor]:
     """
-    Pointwise diagnostics: premium, envelope utilization, relative HJB
-    residual, and the argmax allocation. Mirrors loss.pde_loss.
+    Pointwise diagnostics: premium, envelope utilization, relative HJB residual, and
+    the argmax allocation. Mirrors loss.subsolution_loss.
     """
     m_b, m_c = m_b.requires_grad_(True), m_c.requires_grad_(True)
     tau_bb = tau_bb.requires_grad_(True)
@@ -64,6 +64,7 @@ def probe(
     det = tau_bb * tau_cc - tau_bc**2
 
     def mean_diffusion(w_b: Tensor, w_c: Tensor) -> Tensor:
+        """The Ito term for a pair direction, given that pair's weights."""
         return 0.5 * (w_b**2 * v_mbmb + 2.0 * w_b * w_c * v_mbmc + w_c**2 * v_mcmc)
 
     l_ab = mean_diffusion(tau_cc / det, -tau_bc / det) + v_tbb
@@ -98,10 +99,9 @@ def probe(
 
 def wedge_slice(value: DimensionlessValueFunction, tau: float, path: Path) -> None:
     """
-    2-D slice over means at tau_bb = tau_cc = tau, correlated tau_bc, masked
-    to the wedge m_c <= m_b <= 0 (strictly inside: the relu kink sits at
-    m_b = 0). The mean axis spans 3 posterior sd, so slices are comparable
-    across tau.
+    2-D slice over means at tau_bb = tau_cc = tau, correlated tau_bc, masked to the
+    wedge m_c <= m_b <= 0 (strictly inside: the relu kink sits at m_b = 0). The mean
+    axis spans 3 posterior sd, so slices are comparable across tau.
     """
     axis = torch.linspace(-3.0 / tau**0.5, -0.02, 150)
     m_b, m_c = torch.meshgrid(axis, axis, indexing="xy")
@@ -118,8 +118,8 @@ def wedge_slice(value: DimensionlessValueFunction, tau: float, path: Path) -> No
         z = field.masked_fill(~wedge, torch.nan).reshape(150, 150)
         diverging = name == "residual"
         limit = z[wedge.reshape(150, 150)].abs().max().item()
-        # The three alpha panels share the [0, 1] scale so they read as one
-        # allocation; the top row keeps per-panel autoscale.
+        # The three alpha panels share the [0, 1] scale so they read as one allocation;
+        # the top row keeps per-panel autoscale.
         alpha_panel = name.startswith("alpha")
         image = ax.pcolormesh(
             axis,
@@ -141,8 +141,8 @@ def wedge_slice(value: DimensionlessValueFunction, tau: float, path: Path) -> No
 
 def tau_lines(value: DimensionlessValueFunction, path: Path) -> None:
     """
-    Premium and relative residual along tau_bb = tau_cc = t at the correlated
-    tau_bc, through chosen mean points; the first is the triple point.
+    Premium and relative residual along tau_bb = tau_cc = t at the correlated tau_bc,
+    through chosen mean points; the first is the triple point.
     """
     points = [(-0.05, -0.05), (-0.5, -0.5), (-1.0, -1.0), (-0.05, -2.0)]
     t = torch.logspace(-2.5, 0.9, 200)
@@ -173,8 +173,8 @@ def tau_lines(value: DimensionlessValueFunction, path: Path) -> None:
 
 def symmetric_point(value: DimensionlessValueFunction) -> None:
     """
-    Allocation at the near-symmetric point m_b = m_c = -eps, correlated
-    tau_bc: should tend to (1/3, 1/3, 1/3).
+    Allocation at the near-symmetric point m_b = m_c = -eps, correlated tau_bc: should
+    tend to (1/3, 1/3, 1/3).
     """
     print("tau      alpha_a  alpha_b  alpha_c   residual")
     for tau in [0.03, 0.1, 0.3, 1.0, 3.0, 8.0]:
@@ -197,8 +197,8 @@ def symmetric_point(value: DimensionlessValueFunction) -> None:
 )
 def main(in_path: Path) -> None:
     """
-    Render wedge slices and tau lines as pngs in data/, print the
-    symmetric-point allocation table.
+    Render wedge slices and tau lines as pngs in data/, print the symmetric-point
+    allocation table.
     """
     value = DimensionlessValueFunction.load(in_path)
 

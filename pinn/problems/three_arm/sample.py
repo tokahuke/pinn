@@ -13,37 +13,55 @@ from torch.quasirandom import SobolEngine
 
 from ...utils import chi_squared_1, decade_scale, exponential, laplace
 
-# Sampling constants: the floor keeps det T >= PRIOR_FLOOR**2, fencing the
-# singular boundary of the information box. Numerical stability ONLY -- it
-# encodes no prior; the net is trained general down to priors ~30 sd wide.
-# No real experiment starts more agnostic than that, and each decade below
-# costs another 100x in PDE stiffness (the learning numbers carry 1/det) for
-# territory nobody visits. PRECISION_MEAN scales the chi-squared-1 law
-# per pairwise precision; SCALE_DECADES is the log10 range of the common
-# scale multiplying all three (jointly-low states get whole-decade mass,
-# never a triple coincidence); MEAN_SCALE is the Laplace width in units of
-# each mean's own posterior standard deviation.
 PRIOR_FLOOR = 1e-3
+"""
+Keeps det T >= PRIOR_FLOOR**2, fencing the singular boundary of the information
+box. Numerical stability **only**: it encodes no prior, and the net trains general
+down to priors ~30 sd wide. Each decade below costs another 100x in PDE stiffness
+(the learning numbers carry 1/det) for territory nobody visits.
+"""
+
 PRECISION_MEAN = 2.0
+"""Scale of the chi-squared-1 law drawn for each pairwise precision."""
+
 SCALE_DECADES = 3.0
+"""
+The log10 range of the common scale multiplying all three precisions. It moves
+them together, so jointly-low states get whole-decade mass instead of needing a
+triple coincidence.
+"""
+
 MEAN_SCALE = 2.0
+"""The Laplace width, in units of each mean's own posterior standard deviation."""
 
 _SOBOL = SobolEngine(dimension=6, scramble=True)
+"""Six uniforms per interior state: three precisions, two means, one common scale."""
+
 _SOBOL_WALL = SobolEngine(dimension=5, scramble=True)
+"""Five uniforms per wall state: the interior draw with one mean left out."""
 
 
 @dataclass
 class Sample:
     """
-    A batch of collocation states, precision in matrix entries (tau_bc <= 0
-    always: reachable states only).
+    A batch of collocation states, with the precision in matrix entries. Only
+    reachable states are ever built, which is what tau_bc <= 0 records.
     """
 
     m_b: Tensor
+    """Posterior mean of arm b, as a contrast against the control."""
+
     m_c: Tensor
+    """Posterior mean of arm c, as a contrast against the control."""
+
     tau_bb: Tensor
+    """Precision matrix entry for b against itself."""
+
     tau_bc: Tensor
+    """Off-diagonal precision entry, never positive on a reachable state."""
+
     tau_cc: Tensor
+    """Precision matrix entry for c against itself."""
 
     @classmethod
     def draw(cls, n: int) -> Sample:
@@ -57,10 +75,9 @@ class Sample:
             t[:, 0], t[:, 1], t[:, 2], t[:, 5]
         )
 
-        # Means last, conditionally on the precisions: each mean is drawn with
-        # width proportional to its own posterior standard deviation, so the
-        # cloud tracks the corridor at every information level (the two_arm
-        # 2/sqrt(tauhat) trick, matrix edition).
+        # Means last, conditionally on the precisions: width proportional to
+        # each posterior standard deviation, so the cloud tracks the corridor at
+        # every information level (the two_arm 2/sqrt(tauhat) trick, in matrix).
         det = tau_bb * tau_cc - tau_bc**2
         m_b = MEAN_SCALE * (tau_cc / det).sqrt() * laplace(t[:, 3])
         m_c = MEAN_SCALE * (tau_bb / det).sqrt() * laplace(t[:, 4])
@@ -68,24 +85,15 @@ class Sample:
         return cls(m_b, m_c, tau_bb, tau_bc, tau_cc)
 
     def fold(self) -> Sample:
-        """
-        Roll the batch into the fundamental wedge; see fold_ordered.
-        """
+        """Roll the batch into the fundamental wedge; see `fold_ordered`."""
         return self.fold_ordered()[0]
 
     def fold_ordered(self) -> tuple[Sample, Tensor]:
         """
-        Roll the batch into the fundamental wedge {m_c <= m_b <= 0} by the arm
-        relabel that sorts the three arm levels (0, m_b, m_c) descending: best
-        becomes control, runner-up becomes b. In the pair coordinates of the precision,
-        (tau_bb + tau_bc, tau_cc + tau_bc, -tau_bc) the relabel is a pure
-        permutation of pair labels -- pair {i, j} lives at index i + j - 1 --
-        so the taus fold by permuting three coordinates and reassembling. The
-        premium is invariant under all of this (doc section 6), so training
-        folds freely. Policy readout needs the applied relabel back: the
-        returned order maps wedge role k to physical arm order[:, k]
-        (0 = a, 1 = b, 2 = c), so wedge-role allocations un-permute by
-        alpha_physical.scatter_(1, order, alpha_roles).
+        Roll the batch into the fundamental wedge {m_c <= m_b <= 0} by the relabel
+        sorting the arm levels (0, m_b, m_c) descending; in pair coordinates that
+        is a permutation, and the premium is invariant under it (doc sections 6,
+        7). The returned order maps wedge role k to physical arm order[:, k].
         """
         levels = torch.stack([torch.zeros_like(self.m_b), self.m_b, self.m_c], dim=-1)
         order = levels.argsort(dim=-1, descending=True)
@@ -103,6 +111,7 @@ class Sample:
         )
 
         def pair_coordinate(arm_one: Tensor, arm_two: Tensor) -> Tensor:
+            """The pair coordinate of the two named arms, read at index i + j - 1."""
             return pair_coordinates.gather(
                 -1, (arm_one + arm_two - 1).unsqueeze(-1)
             ).squeeze(-1)
@@ -118,16 +127,22 @@ class Sample:
 class RidgeSample:
     """
     A batch of wall states, four coordinates: one free mean plus the precision
-    entries. The missing fifth coordinate is implied by which wall the batch
-    is drawn for: on the control tie, mean is m_c and m_b = 0; on the
-    treatment tie, mean is the common value m_b = m_c. Same reachability
-    contract as Sample (tau_bc <= 0).
+    entries. The missing fifth coordinate is implied by which wall the batch is
+    drawn for: on the control tie, mean is m_c and m_b = 0; on the treatment tie,
+    mean is the common value m_b = m_c. Same reachability contract as `Sample`.
     """
 
     mean: Tensor
+    """The wall's one free mean; which mean it is depends on the wall."""
+
     tau_bb: Tensor
+    """Precision matrix entry for b against itself."""
+
     tau_bc: Tensor
+    """Off-diagonal precision entry, never positive on a reachable state."""
+
     tau_cc: Tensor
+    """Precision matrix entry for c against itself."""
 
     @classmethod
     def control_tie(cls, n: int) -> RidgeSample:
@@ -145,46 +160,6 @@ class RidgeSample:
         m_c = -MEAN_SCALE * (tau_bb / det).sqrt() * exponential(t[:, 3])
 
         return cls(m_c, tau_bb, tau_bc, tau_cc)
-
-    @classmethod
-    def exchangeable(cls, n: int) -> RidgeSample:
-        """
-        States FIXED by the whole relabelling group: all three means equal
-        (so all contrasts 0, carried in `mean`) and all three pairwise
-        precisions equal, which is `T = I [[2, -1], [-1, 2]]`.
-
-        Built exactly rather than drawn, because the interior law cannot
-        produce them: `PRIOR_FLOOR` is added to tau_bb and tau_cc, i.e. to the
-        two pairs containing the control, and not to tau_bc -- so its states
-        are always a little lopsided in the pairs. Here the floor goes on the
-        common precision instead, where it cannot break the symmetry.
-
-        One free coordinate, the common precision, on the interior law's own
-        decade-spread scale: the asymmetry these states measure is worst at
-        the bottom of it (58% at the floor against 6.5% at I ~ 1), and the
-        arena boots every run at exactly such a state.
-        """
-        t = _SOBOL_WALL.draw(n).clamp(1e-7, 1.0 - 1.0e-7)
-        # HALF the floored diagonal, not a floored pair coordinate: the
-        # interior law floors tau_bb, so `T = I [[2,-1],[-1,2]]` reaches
-        # tau_bb = PRIOR_FLOOR only at I = PRIOR_FLOOR / 2. Flooring I itself
-        # put the whole family at tau_bb >= 2 PRIOR_FLOOR and MISSED THE STATE
-        # THE ARENA BOOTS AT, which is exactly tau_bb = PRIOR_FLOOR; the first
-        # version of this sampler did that and fixed the middle decades while
-        # leaving the floor decade's 58% spread untouched.
-        precision = 0.5 * (
-            PRIOR_FLOOR
-            + PRECISION_MEAN
-            * decade_scale(t[:, 0], SCALE_DECADES)
-            * chi_squared_1(t[:, 1])
-        )
-
-        return cls(
-            torch.zeros_like(precision),
-            2.0 * precision,
-            -precision,
-            2.0 * precision,
-        )
 
     @classmethod
     def treatment_tie(cls, n: int) -> RidgeSample:
@@ -209,12 +184,10 @@ def _precision_from_uniforms(
     u_ab: Tensor, u_ac: Tensor, u_bc: Tensor, u_scale: Tensor
 ) -> tuple[Tensor, Tensor, Tensor]:
     """
-    Uniforms -> pairwise precisions (chi-squared-1 shapes times one common
-    log-spread scale, every draw reachable) -> precision entries via the doc
-    section 7 affine map, with the floor keeping T invertible on the box
-    faces. The common scale spans SCALE_DECADES decades downward, densest at
-    1: it moves all three precisions together, so low-information states of
-    every magnitude are first-class events.
+    Uniforms into pairwise precisions (chi-squared-1 shapes times one common
+    log-spread scale, every draw reachable), then into precision entries via the
+    doc section 7 affine map, the floor keeping T invertible on the box faces.
+    One scale moves all three, so every magnitude of ignorance is first-class.
     """
     scale = PRECISION_MEAN * decade_scale(u_scale, SCALE_DECADES)
     precision_ab = scale * chi_squared_1(u_ab)
@@ -257,14 +230,9 @@ if __name__ == "__main__":
     for name in vars(folded):
         assert torch.allclose(getattr(refolded, name), getattr(folded, name), atol=1e-5)
 
-    # det T is preserved because the relabels are congruences by permutation
-    # matrices. That is exact algebra, so test it in float64: in float32 the
-    # fold's own pair-coordinate reassembly cancels (tau_bb + tau_bc is
-    # precision_ab, a difference of similar numbers when precision_bc
-    # dominates) and det then floors at PRIOR_FLOOR**2 = 1e-6 against O(1)
-    # products -- about one significant digit. Asserted in float32 at
-    # rtol=1e-4 this failed on ~7% of unseeded Sobol scrambles, silently,
-    # because the scramble is drawn from the global rng at import.
+    # det T is preserved by the relabel congruences, which is exact algebra, so
+    # test it in float64: in float32 the reassembly cancels and this fails on ~7%
+    # of unseeded scrambles (kb section 19.7).
     wide = Sample(*(field.double() for field in vars(draw).values()))
     wide_folded, _ = wide.fold_ordered()
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import click
 
-from .pod import Pod, shell
+from .pod import REMOTE, Pod, shell
 
 
 @click.command()
@@ -14,10 +14,13 @@ from .pod import Pod, shell
 @click.argument("paths", nargs=-1, required=True)
 def cp(name: str, paths: tuple[str, ...]) -> None:
     """
-    Copy PATHS, scp-style: a leading `:` marks the pod side, one direction per call
-    (`jobq cp data/two_arm.pt :/workspace/`). This is how a checkpoint travels, since
-    `jobq up` excludes data/. Sent with -L, not plain -a: the canonical names are
-    symlinks and rsync's default sends the link itself, which arrives dangling.
+    Copy PATHS, scp-style: a leading `:` marks the pod side, one direction per call.
+    A relative pod path is anchored at the repo, where `jobq run` commands run, so
+    `jobq cp data/two_arm.pt :data/` lands where `pinn train --in data/...` looks
+    (bare `:host-relative` would mean root's HOME). This is how a checkpoint
+    travels, since `jobq up` excludes data/. Sent with -L, not plain -a: the
+    canonical names are symlinks and rsync's default sends the link itself, which
+    arrives dangling.
     """
     if len(paths) < 2:
         raise click.ClickException("need at least a source and a destination")
@@ -33,8 +36,19 @@ def cp(name: str, paths: tuple[str, ...]) -> None:
     pod = Pod.require(name)
 
     def resolve(path: str) -> str:
-        """One path as rsync wants it, with a leading `:` becoming the pod's host."""
-        return f"{pod.host}:{path[1:]}" if path.startswith(":") else path
+        """
+        One path as rsync wants it: a leading `:` becomes the pod's host, and a
+        relative pod path is anchored at the repo.
+        """
+        if path.startswith(":") is False:
+            return path
+
+        remote = path[1:]
+
+        if remote.startswith("/") is False:
+            remote = f"{REMOTE}/{remote}"
+
+        return f"{pod.host}:{remote}"
 
     shell(
         [

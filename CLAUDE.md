@@ -332,23 +332,23 @@ two-sided residual. The line above is a baseline for the three-arm pair only.
   CONVERGED FOR THIS TOPOLOGY: three learning rates, 1e-4 (19x), 3e-5 (38%),
   1e-5 (2%) -- the last cut bought nothing, so the floor is 24x24's, not the
   schedule's, and the next lever is width or a kink graft. No kink branch.
-- three_arm: `three_arm.pt` -> `three_arm.64x64x64k8.pt`, on the SUBSOLUTION
-  OBJECTIVE since 2026-08-16, trained off the two-sided champion it replaced (kept as
-  `three_arm.64x64x64k8.two-sided.pt`; the two are NOT comparable on pde).
-  Mean violation 1.92e-3 -> 2.59e-5, overclaiming states 26.8% -> 1.44%,
-  sup(residual+) 3.52e-1 -> 2.28e-2, and the premium UP 0.3% -- it fixes where
-  it overclaims rather than inflating the value, which is exactly what
-  three_arm_v3 failed to do. AND IT BEATS THE DROP-ONE BASELINE, the first
-  trained three-arm net to manage it: 20,000 paired reps in two disjoint seed
-  blocks, -863 +/- 354 against drop-one, -398 +/- 352 against the old
-  champion, -4354 +/- 280 against Thompson. The champion margin is 2.2 sigma
-  -- suggestive, not established; it was promoted on the bound numbers with the
-  arena as corroboration. Its architecture is unchanged and still the decisive
-  move of 2026-08-10: 3 hidden layers with 8 stitched saturated kink units
-  (tail -19%, worst point -25% in one 30k run, junction specialist unit
-  self-oriented onto `z_bc`). A from-scratch 16-kink co-training run gave
-  communal branch anatomy and no junction specialist -- sequencing is
-  load-bearing, see learnings section 8.
+- three_arm: `three_arm.pt` -> `three_arm.64x64x64k8.2026-08-17.pt`, promoted
+  2026-08-18: the LEARNING-TIE net (kb section 19.8), retrained off the
+  2026-08-16 subsolution champion, which stays at `three_arm.64x64x64k8.pt`.
+  The learning ties grade the l-symmetries at the walls that no other term
+  saw; the flat-prior opening went (0.446, 0.376, 0.178) ->
+  (0.350, 0.345, 0.306) at the cost of a 4x looser bound (violation
+  2.2e-5 -> 9.6e-5, premium -0.85%), and the arena is indifferent
+  (-13 +/- 341 over 20,000 paired reps; both ~4,400 ahead of Thompson).
+  Promoted on the policy fix with the arena as the no-regression guarantee.
+  Its predecessor's record: subsolution objective since 2026-08-16 (two-sided
+  ancestor kept as `three_arm.64x64x64k8.two-sided.pt`, NOT comparable on
+  pde), first trained net to beat drop-one (-863 +/- 354 over 20,000 paired
+  reps in two blocks; -4354 +/- 280 against Thompson). Architecture unchanged
+  and still the decisive move of 2026-08-10: 3 hidden layers with 8 stitched
+  saturated kink units (junction specialist unit self-oriented onto `z_bc`).
+  A from-scratch 16-kink co-training run gave communal branch anatomy and no
+  junction specialist -- sequencing is load-bearing, see learnings section 8.
 - three_arm_drift: `three_arm_drift.pt` -> `three_arm_drift.128x128x128k16.pt`,
   promoted 2026-08-17 and TRAINED FROM SCRATCH -- no ancestry from any earlier
   3ad net, which is why the whole pre-2026-08-13 mis-sampled lineage is simply

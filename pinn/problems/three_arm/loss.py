@@ -42,8 +42,9 @@ SLACK_PRICE = 0.0
 """
 The pinball tilt: what one unit of slack costs as a share of the residual
 budget, 0 being the pure subsolution objective and 0.5 the symmetric two-sided
-loss in L1. 0 is right for this champion, which was polished at 0; 0.02 is for
-**cold starts**, and kb/three_arm.md section 19.5 has why.
+loss in L1. 0 is the polish value; 0.02 is for **cold starts** and for stages
+that push the net off its polish, like the learning-tie retrain's first leg
+(kb/three_arm.md section 19.5).
 """
 
 CONCAVITY_SCALE = 1.0e-3
@@ -59,6 +60,100 @@ at the answer and invisible to the residual, so it moves the path and not the
 fixed point, and zero on the dead solution. Post-saturation natural units,
 calibrated on the *median* pde over seven draws; one draw put it at 730%.
 """
+
+LEARNING_TIE_WEIGHT = 1.0
+"""
+Weight on the learning ties, the value ties' second-order siblings: placers,
+not auxiliaries, since the subsolution objective is blind to the l-ratios
+that decide the policy (the max *value* is envelope-insensitive to the
+argmax) and one-sidedness pays for inflating an l. Started at 0.1 (the climb
+term's scale, from medians on the 2026-08-16 champion: 9.6e-2 control,
+4.5e-2 treatment over 7 draws); raised 10x at 14k iterations when
+treatment_learning sat flat at ~7e-3 for 7k iterations with the corner
+policy stalled at 0.13 control share. Falling is fine, stuck means raise 10x.
+"""
+
+
+def _learning_numbers(
+    value: DimensionlessValueFunction,
+    m_b: Tensor,
+    m_c: Tensor,
+    tau_bb: Tensor,
+    tau_bc: Tensor,
+    tau_cc: Tensor,
+) -> tuple[Tensor, Tensor, Tensor]:
+    """The learning numbers alone, through the model's one derivative chain."""
+    _, _, learning = value.hamiltonian(m_b, m_c, tau_bb, tau_bc, tau_cc)
+
+    return learning
+
+
+def relative_mismatch(left: Tensor, right: Tensor) -> Tensor:
+    """
+    A scale-free equality score in [0, 1]: zero exactly on left = right (both
+    zero included, so the dead solution scores 0), and the rescale is a
+    positive per-point factor on an equality constraint, the one sanctioned
+    exception to never-scale-the-residual: it cannot move the zero set, and
+    without it the floor decade's l ~ 1/det owns the gradient.
+    """
+    return ((left - right) / (left.abs() + right.abs() + 1e-8)).pow(2)
+
+
+def control_learning_loss(
+    value: DimensionlessValueFunction, draw: RidgeSample
+) -> Tensor:
+    """
+    Learning ties on the control tie {m_b = 0}: the a<->b swap fixes the wall,
+    maps pair ab to itself and swaps ac <-> bc, so at the mirror s' of
+    control_tie_loss the true solution has l_ab(s) = l_ab(s'),
+    l_ac(s) = l_bc(s'), l_bc(s) = l_ac(s'). The value ties hold first
+    derivatives only; the policy reads these second-order numbers, and no
+    other term grades them (kb section 19.8).
+    """
+    zero = torch.zeros_like(draw.mean)
+    l_ab, l_ac, l_bc = _learning_numbers(
+        value, zero, draw.mean, draw.tau_bb, draw.tau_bc, draw.tau_cc
+    )
+    mirror_ab, mirror_ac, mirror_bc = _learning_numbers(
+        value,
+        zero,
+        draw.mean,
+        draw.tau_bb + 2.0 * draw.tau_bc + draw.tau_cc,
+        -(draw.tau_bc + draw.tau_cc),
+        draw.tau_cc,
+    )
+
+    return (
+        relative_mismatch(l_ab, mirror_ab)
+        + relative_mismatch(l_ac, mirror_bc)
+        + relative_mismatch(l_bc, mirror_ac)
+    ).mean()
+
+
+def treatment_learning_loss(
+    value: DimensionlessValueFunction, draw: RidgeSample
+) -> Tensor:
+    """
+    Learning ties on the treatment tie {m_b = m_c}: the b<->c swap fixes the
+    wall, swaps ab <-> ac and fixes bc, so at the swapped-precision mirror
+    s' = (m, m, tau_cc, tau_bc, tau_bb) the true solution has
+    l_ab(s) = l_ac(s'), l_ac(s) = l_ab(s'), l_bc(s) = l_bc(s'). At self-mirror
+    states (tau_bb = tau_cc, the flat-prior corner included) this collapses to
+    l_ab = l_ac on the state itself, which the 2026-08-17 corner probe found
+    violated 2:1 on the champion (kb section 19.8).
+    """
+    l_ab, l_ac, l_bc = _learning_numbers(
+        value, draw.mean, draw.mean, draw.tau_bb, draw.tau_bc, draw.tau_cc
+    )
+    mirror_ab, mirror_ac, mirror_bc = _learning_numbers(
+        value, draw.mean, draw.mean, draw.tau_cc, draw.tau_bc, draw.tau_bb
+    )
+
+    return (
+        relative_mismatch(l_ab, mirror_ac)
+        + relative_mismatch(l_ac, mirror_ab)
+        + relative_mismatch(l_bc, mirror_bc)
+    ).mean()
 
 
 def directional_learning(
@@ -191,6 +286,8 @@ def loss(
     violation, climb, concavity = subsolution_loss(value, draw)
     control_residual = control_tie_loss(value, control_draw)
     treatment_residual = treatment_tie_loss(value, treatment_draw)
+    control_learning = control_learning_loss(value, control_draw)
+    treatment_learning = treatment_learning_loss(value, treatment_draw)
 
     if iteration is not None:
         print(
@@ -198,12 +295,15 @@ def loss(
             f"  climb {climb.item():.4e}"
             f"  control_tie {control_residual.item():.3e}"
             f"  treatment_tie {treatment_residual.item():.3e}"
+            f"  control_learning {control_learning.item():.3e}"
+            f"  treatment_learning {treatment_learning.item():.3e}"
             f"  concavity {concavity.item():.3e}"
         )
 
     return (
         violation
         + TIE_WEIGHT * (control_residual + treatment_residual)
+        + LEARNING_TIE_WEIGHT * (control_learning + treatment_learning)
         + CONCAVITY_WEIGHT * concavity
         - CLIMB_WEIGHT * climb
     )
@@ -301,6 +401,30 @@ if __name__ == "__main__":
 
     assert abs(control_zero.item() - 1.0) < 1e-6, control_zero.item()
     assert treatment_zero.item() < 1e-10, treatment_zero.item()
+
+    # The learning ties on the zero premium: every learning number is 0, and
+    # the relative form scores 0/eps = 0 exactly, so the dead solution gains
+    # nothing from them (the degeneracy floor stays where it was).
+    assert control_learning_loss(zero, RidgeSample.control_tie(256)).item() == 0.0
+    assert treatment_learning_loss(zero, RidgeSample.treatment_tie(256)).item() == 0.0
+
+    # A premium that breaks the swap symmetries (tau_bb alone is not invariant
+    # under either transposition) must fire both learning ties.
+    class _AsymmetricPremium(nn.Module):
+        """u = tanh(tau_bb), invariant under neither wall's swap."""
+
+        def forward(
+            self, m_b: Tensor, m_c: Tensor, tbb: Tensor, tbc: Tensor, tcc: Tensor
+        ) -> Tensor:
+            return tbb.tanh()
+
+    asymmetric = DimensionlessValueFunction(_AsymmetricPremium())
+
+    assert control_learning_loss(asymmetric, RidgeSample.control_tie(256)).item() > 1e-3
+    assert (
+        treatment_learning_loss(asymmetric, RidgeSample.treatment_tie(256)).item()
+        > 1e-3
+    )
 
     # Analytic satisfiers, each for one wall only: u = m_b / 2 zeroes the
     # control tie (1/2 + 1/2 + 0 = 1) but not the treatment tie; u = m_b + m_c
@@ -412,6 +536,14 @@ if __name__ == "__main__":
     assert torch.allclose(relabeled_loss, original_loss, rtol=1e-3, atol=1e-9), (
         relabeled_loss.item(),
         original_loss.item(),
+    )
+
+    # An S3-invariant premium satisfies the learning ties identically; float32
+    # through two second-derivative chains leaves only roundoff, and the
+    # relative form keeps that roundoff dimensionless.
+    assert control_learning_loss(invariant, RidgeSample.control_tie(512)).item() < 1e-6
+    assert (
+        treatment_learning_loss(invariant, RidgeSample.treatment_tie(512)).item() < 1e-6
     )
 
     from pathlib import Path

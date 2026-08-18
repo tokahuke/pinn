@@ -402,6 +402,51 @@ the do-nothing region growing across training (the recorded failure went from
 52 to 65 per cent), or the network's output pressing against the cap at the
 steady state.
 
+### BUILT AND KILLED 2026-08-18: the tight cap is not the floor
+
+The trigger fired and the tight version was built, trained against from
+scratch for ~25k iterations, and killed the same day. Full record, since the
+idea must not be re-tried in this form.
+
+Why it fired: the 2026-08-17 champion had learned `exp(log_scale) = 1.09`
+(the cap is proven only at scale 1, and symmetric slack charges the same for
+overclaiming as underclaiming, so nothing pinned it) with its overshoot mass
+in the top saturation quartile at low det and high etahat; the 2026-08-18
+from-scratch net sat at scale 1.04 with 85% of states above 0.8 of cap. The
+hypothesis: the shipped cap's discarded "decides it" factor has to live
+inside the response at every net size, hence the size-invariant violation
+floor.
+
+The implementation that worked, for whoever rebuilds it: per pair, the
+closed-form correction times a kernel-weighted average of P_p(t) over 12
+Gauss-Laguerre nodes, weights folded into log space and shifted by the
+detached max (bare float32 Laguerre weights underflow at 1e-47 and a
+deep-tail state can land its whole mass on one node, which NaNs the ratio);
++0.02 additive margin on the ratio so quadrature error can only loosen (the
+bare 16-node rule undershot truth by 3.1% at etahat 35); node ladder
+32 -> 16 -> 12 all identical under the margin, 8 breaks the cap. Median
+looseness 0.01%-4% against the shipped cap's 30-90%, no undershoot on three
+seeds against a 4096-point float64 reference, bitwise etahat = 0 anchor
+preserved. Two cuda lessons: module-level rule constants need a per-device
+cache filled by the warmup step, because both `.to(device)` inside a cuda
+graph capture and cpu-resident constants are capture killers.
+
+The measured verdict: from scratch, ~30% below the loose-cap control at
+matched iterations (0.245 vs 0.354 at ~23k), same shelf-and-grind dynamics,
+~4x the step cost. Not the order-of-magnitude break that would justify the
+compute, so both runs were killed and the code reverted.
+
+What the attempt actually taught: with a near-exact cap the solution sits at
+~0.96 of it, which parks the response map `y/(1+y)` where its gradient is
+`(1-s)^2` -- a ~25x throttle against mid-range. The loose cap has healthy
+gradients on a wrong-shaped target; the tight cap has the right target in
+the map's dead zone. Any revival must change the RESPONSE, not just the cap:
+the parked idea is the deficit parametrization `u = cap * exp(-z(r))`,
+`du/dz = -u`, healthy near the cap and relative-precision in the deep wedge,
+defensible here because this problem has no contact set and so never needs
+the exact-zero region the relu-squared map buys. Untried; it costs the
+etahat = 0 graft anchor against three_arm's response.
+
 ### REJECTED, with the measurement: one call at the average spread
 
 Tempting, and wrong. The integral averages over time with mean 1, so *if* the

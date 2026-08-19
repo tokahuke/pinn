@@ -34,8 +34,30 @@ triple coincidence.
 MEAN_SCALE = 2.0
 """The Laplace width, in units of each mean's own posterior standard deviation."""
 
-_SOBOL = SobolEngine(dimension=6, scramble=True)
-"""Six uniforms per interior state: three precisions, two means, one common scale."""
+FUNNEL_SHARE = 0.25
+"""
+Share of interior draws given a *negative* bc pair precision (tau_bc > 0):
+the negatively-correlated funnel, unreachable from any experiment history but
+open to hand-authored priors, and transient (learning and drift both drain it
+into the reachable set). Sampled so the served function is trained there
+instead of extrapolated; 2026-08-18's probe measured up to 24% underclaims
+against the drop-one floor and 0.49 policy jumps at the funnel mouth on the
+extrapolating champion. Walls stay reachable: the tie conditions are
+statements about the reachable boundary.
+"""
+
+DET_KEEP = 1e-3
+"""
+The funnel's relative det floor: det >= DET_KEEP * AB, which keeps ~4 of
+float32's ~7 digits through the cancellation and still reaches precision
+correlations near sqrt(1 - DET_KEEP) ~ 0.9995.
+"""
+
+_SOBOL = SobolEngine(dimension=7, scramble=True)
+"""
+Seven uniforms per interior state: three precisions, two means, one common
+scale, one funnel branch-and-depth.
+"""
 
 _SOBOL_WALL = SobolEngine(dimension=5, scramble=True)
 """Five uniforms per wall state: the interior draw with one mean left out."""
@@ -44,8 +66,10 @@ _SOBOL_WALL = SobolEngine(dimension=5, scramble=True)
 @dataclass
 class Sample:
     """
-    A batch of collocation states, with the precision in matrix entries. Only
-    reachable states are ever built, which is what tau_bc <= 0 records.
+    A batch of collocation states, with the precision in matrix entries. The
+    a-pair coordinates are floored and det >= PRIOR_FLOOR**2 always; tau_bc is
+    <= 0 on the reachable branch and > 0 on the FUNNEL_SHARE of draws that
+    train the negatively-correlated funnel.
     """
 
     m_b: Tensor
@@ -74,6 +98,28 @@ class Sample:
         tau_bb, tau_bc, tau_cc = _precision_from_uniforms(
             t[:, 0], t[:, 1], t[:, 2], t[:, 5]
         )
+
+        # The funnel branch: FUNNEL_SHARE of draws swap their bc pair precision
+        # for a negative one, depth uniform up to the ceiling that keeps
+        # det = AB - q(A + B) above a **relative** floor: the funnel reaches the
+        # det floor by cancellation of O(AB) products, and float32 carries ~7
+        # digits, so an absolute 1e-6 target under O(1e2) products computes
+        # negative and NaNs the mean draw (kb section 19.7's lesson; it killed
+        # the first funnel run at iteration 3k). The swap leaves the a-pair
+        # coordinates invariant (tau_bb + tau_bc is A on both branches).
+        into_funnel = t[:, 6] < FUNNEL_SHARE
+        a_pair = tau_bb + tau_bc
+        b_pair = tau_cc + tau_bc
+        det_floor = torch.maximum(
+            torch.full_like(a_pair, PRIOR_FLOOR**2),
+            DET_KEEP * a_pair * b_pair,
+        )
+        depth = (t[:, 6] / FUNNEL_SHARE).clamp(0.0, 1.0) * (
+            (a_pair * b_pair - det_floor) / (a_pair + b_pair)
+        ).clamp_min(0.0)
+        tau_bb = torch.where(into_funnel, a_pair - depth, tau_bb)
+        tau_cc = torch.where(into_funnel, b_pair - depth, tau_cc)
+        tau_bc = torch.where(into_funnel, depth, tau_bc)
 
         # Means last, conditionally on the precisions: width proportional to
         # each posterior standard deviation, so the cloud tracks the corridor at
@@ -205,9 +251,20 @@ if __name__ == "__main__":
     draw = Sample.draw(1000)
 
     assert draw.m_b.shape == draw.tau_bc.shape == (1000,)
-    assert (draw.tau_bc <= 0).all()
     assert (draw.tau_bb + draw.tau_bc >= PRIOR_FLOOR - 1e-6).all()
     assert (draw.tau_cc + draw.tau_bc >= PRIOR_FLOOR - 1e-6).all()
+
+    # The funnel branch fills its share, and only its share, of the cloud,
+    # and its det keeps the relative floor that makes float32 survivable.
+    funnel_share = (draw.tau_bc > 0).float().mean().item()
+
+    assert abs(funnel_share - FUNNEL_SHARE) < 0.05, funnel_share
+
+    in_funnel = draw.tau_bc > 0
+    products = (draw.tau_bb + draw.tau_bc) * (draw.tau_cc + draw.tau_bc)
+    funnel_det = (draw.tau_bb * draw.tau_cc - draw.tau_bc**2)[in_funnel]
+
+    assert (funnel_det >= 0.5 * DET_KEEP * products[in_funnel]).all()
 
     det = draw.tau_bb * draw.tau_cc - draw.tau_bc**2
 
@@ -223,7 +280,6 @@ if __name__ == "__main__":
     assert (sorted_levels.diff(dim=-1) <= 1e-6).all()
 
     assert (folded.m_b <= 1e-6).all() and (folded.m_c <= folded.m_b + 1e-6).all()
-    assert (folded.tau_bc <= 1e-6).all()
 
     refolded = folded.fold()
 

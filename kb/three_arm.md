@@ -1219,6 +1219,89 @@ two_arm_drift's subsolution swap. Promoted on the policy fix with the arena
 as the no-regression guarantee; the tighter-bound predecessor stays at
 `three_arm.64x64x64k8.pt`.
 
+### 19.9 The funnel program (2026-08-18/19): champion 96x96x96k12
+
+The negatively-correlated funnel (tau_bc > 0, negative bc pair precision) is
+unreachable from any experiment history but open to hand-authored priors, and
+transient: learning and drift both drain it into the reachable set, and
+top-K marginals never enter it at all (Schur complements of SDD M-matrices
+stay SDD M-matrices; verified on 2000 random 4-6 arm states, every triple,
+both base changes). The champion of 2026-08-18 extrapolated there: up to 24%
+underclaims against the drop-one floor (valid at any PD state; the drop
+dynamics do not care about the tau_bc sign) and 0.49 policy swings at the
+funnel mouth at floor precision.
+
+Two deployment pieces landed first and survive the retrain: `_project` in
+model.py, the two_arm _FLATTEST_TAUHAT move in pair coordinates (nearest
+supported state, exit monotone since learning only adds pair precision;
+bitwise identity on supported states via a moved-gate, because the rebuild
+re-associates floats), and the reachability boundary for user priors
+r <= min(sd ratio) with strong equal-variance correlation unconditionally
+reachable.
+
+Sampling: FUNNEL_SHARE = 0.25 of interior draws swap p_bc negative, depth
+uniform up to det >= max(PRIOR_FLOOR^2, DET_KEEP * AB), DET_KEEP = 1e-3.
+The det floor must be RELATIVE: the funnel reaches small det by cancelling
+O(AB) products and float32 keeps ~7 digits, so an absolute 1e-6 target under
+O(1e2) products computes negative and NaNs the mean draw (killed the first
+run at iteration 3k). Walls stay reachable. The deep band (det < 0.1 AB,
+8.5% of the cloud) is 1000x stiffer and carried 72-89% of every net's
+overclaim mass; its gradient share stayed contained on the 64-wide nets
+(1.6-19%) because the violation is linear, and the spike-prints it causes
+recur at a stationary 6-13% of prints without compounding.
+
+Training: three candidates on the funnel cloud at SLACK_PRICE 0.02, ladders
+managed on 90-print block medians with a ~3%/hr too-slow rule. Warm start
+from the champion finished WORST (2.2e-2 print floor; its core-entrenched
+features held the deep funnel at 10% relative overclaim) -- from-scratch beat
+warm-start on the extended cloud. 64x64x64k8 from scratch: 1.44e-2. The
+winner, 96x96x96k12 from scratch (kinks widened 8 -> 12 mid-run by the
+stitch's widening graft, bit-exact at step 0): hot start 1e-3 (saturates
+fast, then backslides -- cut on the turn), ladder to 3e-6, then a slack-0
+polish that took the one-sided violation to a 2.6e-4 core absolute while the
+premium held and deep-funnel overclaim collapsed 400x with the funnel premium
+RISING (verified not bought by deflation). Late polish showed bimodal
+violation thrash (the surviving violating set concentrates in the stiff
+sliver); the 3e-6 cut calmed it. Two NaN deaths in ~40 trainer-hours, both
+the kb 19.7 cancellation with p_bc dominant (tau entries O(t), det below
+float32 resolution); the best-EMA save guard protected the checkpoint both
+times. ANY future funnel training should harden the det chain to float64 in
+_features; a det assert on rebuilt taus at the depth ceiling tests roundoff,
+not correctness -- assert on sorted pair coordinates instead.
+
+PROMOTION (2026-08-19), five-seed slice medians, champion -> 96k12:
+
+    core_rel     0.02% -> 0.06%    core_abs  9.7e-5 -> 2.6e-4  (the price)
+    shallow_rel  5.5%  -> 0.02%    deep_rel  37.9%  -> 0.01%   (the win)
+
+Arena, 15,000 paired reps at production values, baselines bit-identical:
+96k12 - champion = -163 +/- 290 (no regression); vs Thompson -4,504 +/- 357
+against the champion's -4,341 +/- 368. Flat-prior opening (0.341, 0.348,
+0.311): the 19.8 learning-tie asset survives from-scratch training. The
+incumbent serving path (projection + champion) undervalues funnel states
+2.3x on average (the projection pretends to information the prior does not
+have), so the funnel net beats it as a server, not just as a bound.
+`_project` widened to the funnel support at promotion: smallest sorted pair
+coordinate down to the sampler depth ceiling, computed from the same
+expression so in-support draws reproduce it bitwise.
+
+Post-promotion entrail reading (2026-08-19). The trunk is fully alive (no
+dead gains); feature appetite is z-scores, then tails, then log-precisions,
+with the correlation feature ranked 11 of 15 -- the funnel was learned by two
+kink specialists (loudest units oriented onto tau_bc and correlation), not by
+the trunk, and only one of the four widening-graft units came alive. One
+lesion: `exp(log_scale) = 1.117`, so the architectural "premium <= free
+information" proof (valid at scale <= 1) is voided; measured against the
+scale-1 envelope the property still holds on 99.5% of the cloud, the
+zero-information pin sits correctly below the cap (u/envelope 0.993 at the
+floor), and the leak is a 0.5%-of-states pocket at tau ~ 0.1 overclaiming
+free information by up to 4.7%. Scale > 1 is necessary for the breach, not
+sufficient, and the valve is needed (the pin is unrepresentable at scale
+exactly 1). FOLLOW-UP for the next training leg: port the 3ad graveyard's
+SCALE_PRICE (linear tax on log_scale > 0, kb/three_arm_drift.md section 7)
+to this loss, which squeezes scale to the ~1.01 the pin needs and dries the
+pocket. The 2026-08-18 predecessor's scale was never measured.
+
 ## To come
 
 - Nothing mathematical: the problem is fully derived.

@@ -332,8 +332,19 @@ two-sided residual. The line above is a baseline for the three-arm pair only.
   CONVERGED FOR THIS TOPOLOGY: three learning rates, 1e-4 (19x), 3e-5 (38%),
   1e-5 (2%) -- the last cut bought nothing, so the floor is 24x24's, not the
   schedule's, and the next lever is width or a kink graft. No kink branch.
-- three_arm: `three_arm.pt` -> `three_arm.64x64x64k8.2026-08-17.pt`, promoted
-  2026-08-18: the LEARNING-TIE net (kb section 19.8), retrained off the
+- three_arm: `three_arm.pt` -> `three_arm.96x96x96k12.pt`, promoted
+  2026-08-19: the FUNNEL net (kb section 19.9), trained FROM SCRATCH on the
+  funnel-extended cloud (25% negative bc pair precision draws) with the
+  learning ties from day one; warm-starting from the previous champion lost
+  to from-scratch on the extended cloud. Against its predecessor: shallow
+  funnel 5.5% -> 0.02% and deep funnel 37.9% -> 0.01% relative overclaim,
+  core absolute 9.7e-5 -> 2.6e-4 (the price), arena -163 +/- 290 over 15,000
+  paired reps at production values (no regression; -4,504 +/- 357 vs
+  Thompson), flat-prior opening (0.341, 0.348, 0.311). Deployment `_project`
+  serves any PD prior by clamping onto the trained support, funnel included.
+  Its predecessor, the LEARNING-TIE net of 2026-08-18, stays at
+  `three_arm.64x64x64k8.2026-08-17.pt` and still backs the anscombe release;
+  kb section 19.8 is its record, retrained off the
   2026-08-16 subsolution champion, which stays at `three_arm.64x64x64k8.pt`.
   The learning ties grade the l-symmetries at the walls that no other term
   saw; the flat-prior opening went (0.446, 0.376, 0.178) ->

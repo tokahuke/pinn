@@ -15,7 +15,7 @@ from typing import Self
 from ...net import DeclaresTopology, DimensionlessValue, GainedTanh, parse_topology
 from ...net import read_features, read_topology
 from ...utils import nu2
-from .sample import Sample
+from .sample import DET_KEEP, PRIOR_FLOOR, Sample
 from .simplex import Maximum, maximize_quadratic
 
 FEATURE_COUNT = 15
@@ -92,10 +92,12 @@ class ExplorationPremium(DeclaresTopology):
 
     def stitch(self, source: dict) -> None:
         """
-        Adopt a smooth premium's parameters into this (possibly kinked) net.
+        Adopt a smooth or narrower-kinked premium's parameters into this net.
 
-        A source without a kink branch keeps this net's zero-init one, so the
-        graft is bit-exact at step 0; anything else missing fails loudly.
+        A source without a kink branch keeps this net's zero-init one, and a
+        source with fewer kink units keeps its own and takes this net's fresh
+        init for the extra ones, their output weights zeroed; either way the
+        graft is bit-exact at step 0. Anything else missing fails loudly.
         """
         state = dict(source)
         mine = self.state_dict()
@@ -108,6 +110,25 @@ class ExplorationPremium(DeclaresTopology):
                 "kink_out.bias",
             ):
                 state.setdefault(name, mine[name])
+
+            # The widening graft: extra units enter alive (this net's fresh
+            # init carries the +0.5 bias) but silent (zero output weight).
+            extra = self.kinks - state["kink_in.weight"].shape[0]
+
+            if extra > 0:
+                state["kink_in.weight"] = torch.cat(
+                    [state["kink_in.weight"], mine["kink_in.weight"][-extra:]]
+                )
+                state["kink_in.bias"] = torch.cat(
+                    [state["kink_in.bias"], mine["kink_in.bias"][-extra:]]
+                )
+                state["kink_out.weight"] = torch.cat(
+                    [
+                        state["kink_out.weight"],
+                        torch.zeros_like(mine["kink_out.weight"][:, -extra:]),
+                    ],
+                    dim=1,
+                )
         self.load_state_dict(state)
 
     def _features(
@@ -302,15 +323,55 @@ class DimensionlessValueFunction(DimensionlessValue):
         return torch.stack([1.0 - best.x - best.y, best.x, best.y], dim=-1).detach()
 
 
+def _project(tau_bb: Tensor, tau_bc: Tensor, tau_cc: Tensor) -> tuple[Tensor, ...]:
+    """
+    The dimensionless precision, projected onto the trained support: the
+    two_arm _FLATTEST_TAUHAT move (substitute the nearest supported state and
+    let the data wash the substitution out; learning only ever adds pair
+    precision, so the exit is monotone), in pair coordinates. Support after
+    the fold is "the two largest pair coordinates >= PRIOR_FLOOR and the
+    smallest >= minus the sampler funnel's depth ceiling" (two coordinates
+    floored pre-fold, permuted by folding; the funnel branch sends the third
+    negative down to det >= max(FLOOR^2, DET_KEEP * AB)), so the clamps are
+    on the sorted coordinates. States already inside pass through **bitwise**: the
+    rebuild re-associates floats, and only clamped states go through it.
+    """
+    pairs = torch.stack([tau_bb + tau_bc, tau_cc + tau_bc, -tau_bc], dim=-1)
+    ordered, order = pairs.sort(dim=-1)
+    ordered[..., 1:] = ordered[..., 1:].clamp_min(PRIOR_FLOOR)
+
+    # The funnel is trained support since 2026-08-19: the smallest coordinate
+    # may go negative down to the sampler's own det ceiling, computed from the
+    # same expression so an in-support draw reproduces it bitwise.
+    top, middle = ordered[..., 2], ordered[..., 1]
+    det_floor = torch.maximum(
+        torch.full_like(top, PRIOR_FLOOR**2), DET_KEEP * top * middle
+    )
+    deepest = (top * middle - det_floor) / (top + middle)
+    ordered[..., 0] = ordered[..., 0].clamp_min(-deepest)
+    clamped = ordered.gather(-1, order.argsort(dim=-1))
+    moved = (clamped != pairs).any(dim=-1)
+
+    return (
+        torch.where(moved, clamped[..., 0] + clamped[..., 2], tau_bb),
+        torch.where(moved, -clamped[..., 2], tau_bc),
+        torch.where(moved, clamped[..., 1] + clamped[..., 2], tau_cc),
+    )
+
+
 class ValueFunction(nn.Module):
     """
-    Deployment-facing value: real units in and out, any reachable state.
+    Deployment-facing value: real units in and out, any positive-definite
+    belief.
 
     Wraps a trained `DimensionlessValueFunction` with the doc section 11 readout
     dictionary and folds arbitrary states into the fundamental wedge for the
     premium (S3-invariant, doc section 6), keeping the commit term in physical
-    labels. States must be reachable (tau_bc <= 0, pair coordinates nonnegative),
-    and rho = sigma = 1 on wedge states recovers the dimensionless form.
+    labels. States outside the trained support (deeper anti-correlation than
+    the sampler's det ceiling, or more than one pair coordinate below its
+    floor) are projected onto it first (`_project`); supported states, funnel
+    included, pass through untouched, and rho = sigma = 1 on wedge states
+    recovers the dimensionless form.
     """
 
     def __init__(
@@ -326,8 +387,9 @@ class ValueFunction(nn.Module):
         self, m_b: Tensor, m_c: Tensor, tau_bb: Tensor, tau_bc: Tensor, tau_cc: Tensor
     ) -> tuple[Sample, Tensor]:
         """
-        Nondimensionalize and roll into the fundamental wedge; the returned
-        order un-permutes wedge roles back to physical arms.
+        Nondimensionalize, project onto the trained support, and roll into the
+        fundamental wedge; the returned order un-permutes wedge roles back to
+        physical arms.
         """
         mean_scale = self.sigma * self.rho**0.5
         precision_scale = self.rho * self.sigma**2
@@ -335,9 +397,11 @@ class ValueFunction(nn.Module):
         return Sample(
             m_b / mean_scale,
             m_c / mean_scale,
-            precision_scale * tau_bb,
-            precision_scale * tau_bc,
-            precision_scale * tau_cc,
+            *_project(
+                precision_scale * tau_bb,
+                precision_scale * tau_bc,
+                precision_scale * tau_cc,
+            ),
         ).fold_ordered()
 
     def forward(
@@ -458,6 +522,8 @@ if __name__ == "__main__":
     dimensionless = DimensionlessValueFunction(premium)
     wrapper = ValueFunction(dimensionless, rho=1.0, sigma=1.0)
 
+    # The whole sampler cloud is trained support since 2026-08-19, funnel
+    # included, so the wrapper identity holds ungated.
     assert torch.allclose(wrapper(*state), dimensionless(*state), atol=1e-6)
 
     anywhere = (m_b, m_c, *taus)
@@ -492,4 +558,71 @@ if __name__ == "__main__":
     swapped_alpha = wrapper.policy(*swapped)
 
     assert torch.allclose(alpha[:, [0, 2, 1]], swapped_alpha, atol=1e-5)
+    # The widening graft: a k8 source into a k12 target is bit-exact at
+    # step 0 and declares the target's own count.
+    narrow = ExplorationPremium([32, 16], kinks=8)
+    widened = ExplorationPremium([32, 16], kinks=12)
+    widened.stitch(narrow.state_dict())
+
+    assert torch.equal(widened(*state), narrow(*state))
+    assert int(widened.kink_count) == 12
+    assert read_topology(DimensionlessValueFunction(widened).state_dict()) == (
+        [32, 16],
+        12,
+    )
+
+    # The projection: bitwise identity on supported states, lands every
+    # exotic prior in support, and is idempotent.
+    supported = Sample.draw(2048)
+    kept = _project(supported.tau_bb, supported.tau_bc, supported.tau_cc)
+
+    assert torch.equal(kept[0], supported.tau_bb)
+    assert torch.equal(kept[1], supported.tau_bc)
+    assert torch.equal(kept[2], supported.tau_cc)
+
+    # Exotic constructions: the negative-correlation funnel (tau_bc > 0) and
+    # over-correlated priors (a negative pair coordinate), both off-support.
+    base = Sample.draw(512)
+    funnel = _project(base.tau_bb, -0.5 * base.tau_bc.abs() - 0.1, base.tau_cc)
+    squeezed = _project(base.tau_bb, base.tau_bc - base.tau_bb, base.tau_cc)
+
+    for projected in (funnel, squeezed):
+        p = (
+            torch.stack(
+                [
+                    projected[0] + projected[1],
+                    projected[2] + projected[1],
+                    -projected[1],
+                ],
+                dim=-1,
+            )
+            .sort(dim=-1)
+            .values
+        )
+
+        assert (p[:, 1] >= PRIOR_FLOOR - 1e-6).all()
+
+        # The guarantee is on the sorted pair coordinates, not on det via the
+        # rebuilt taus: at the depth ceiling with p_bc dominant the tau
+        # products cancel below float32 resolution (kb section 19.7), so a
+        # det assert would be testing roundoff.
+        det_floor = torch.maximum(
+            torch.full_like(p[:, 2], PRIOR_FLOOR**2), DET_KEEP * p[:, 2] * p[:, 1]
+        )
+        deepest = (p[:, 2] * p[:, 1] - det_floor) / (p[:, 2] + p[:, 1])
+
+        assert (p[:, 0] >= -deepest - 1e-5 * p[:, 2]).all()
+
+        again = _project(*projected)
+
+        assert all(torch.allclose(a, b, atol=1e-7) for a, b in zip(again, projected))
+
+    # And the deployment path swallows them whole: finite value, simplex policy.
+    bound_net = ValueFunction(dimensionless, rho=1.0, sigma=1.0)
+    exotic_alpha = bound_net.policy(
+        base.m_b, base.m_c, base.tau_bb, -0.5 * base.tau_bc.abs() - 0.1, base.tau_cc
+    )
+
+    assert exotic_alpha.isfinite().all()
+    assert torch.allclose(exotic_alpha.sum(dim=-1), torch.ones(512), atol=1e-5)
     print("ok")

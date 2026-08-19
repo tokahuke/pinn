@@ -42,9 +42,9 @@ SLACK_PRICE = 0.0
 """
 The pinball tilt: what one unit of slack costs as a share of the residual
 budget, 0 being the pure subsolution objective and 0.5 the symmetric two-sided
-loss in L1. 0 is the polish value; 0.02 is for **cold starts** and for stages
-that push the net off its polish, like the learning-tie retrain's first leg
-(kb/three_arm.md section 19.5).
+loss in L1. 0 is the polish value; 0.02 is for **cold starts** and for legs
+that open new territory, like the funnel extension (kb/three_arm.md
+section 19.5).
 """
 
 CONCAVITY_SCALE = 1.0e-3
@@ -552,7 +552,14 @@ if __name__ == "__main__":
 
     if champion.exists():
         trained = DimensionlessValueFunction.load(champion)
-        fit = subsolution_loss(trained, Sample.draw(8192).fold())
+        # On the reachable slice: this is a calibration statement about the
+        # core cloud, and a champion predating the funnel branch is expected
+        # to fail out there until retrained.
+        cloud = Sample.draw(8192)
+        reachable = Sample(
+            *(field[cloud.tau_bc <= 0] for field in vars(cloud).values())
+        )
+        fit = subsolution_loss(trained, reachable.fold())
 
         # The LP objective **alone**, without the ties, prefers the champion
         # to the commit envelope. This is what CLIMB_WEIGHT clears, by 10x:
